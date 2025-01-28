@@ -1327,3 +1327,229 @@ The architecture's ability to handle multi-modal data while maintaining temporal
 As we move forward, the open challenges present exciting opportunities for the research community to build upon this foundation. The practical impact of this work will be felt across industries, while its theoretical contributions advance our understanding of sequence processing and temporal dynamics.
 
 Through continued development and community engagement, Event-JEPA has the potential to become a fundamental tool in the broader ecosystem of event sequence analysis and processing systems.
+
+# Multi-Semantic Entity Representations: A Framework for Context-Aware Embeddings
+
+## Conceptual Framework
+
+### 1. Entity Definition
+
+An entity E exists simultaneously in multiple semantic spaces, each providing a different contextual understanding:
+
+```python
+class EntityRepresentation:
+    def __init__(self, entity_id: str):
+        self.id = entity_id
+        self.semantic_spaces = {
+            # Pure modality spaces
+            'text': TextEmbeddingSpace(),      # LLM/text model space
+            'image': ImageEmbeddingSpace(),    # Vision model space
+            'audio': AudioEmbeddingSpace(),    # Audio model space
+            
+            # Contextual spaces
+            'commerce': {
+                'order_context': OrderEmbeddingSpace(),    # How it appears in orders
+                'cart_context': CartEmbeddingSpace(),      # Shopping cart patterns
+                'pricing_context': PricingEmbeddingSpace() # Price relationships
+            },
+            
+            # Task-specific spaces
+            'classification': ClassificationEmbeddingSpace(),
+            'regression': RegressionEmbeddingSpace(),
+            'recommendation': RecommendationEmbeddingSpace(),
+            
+            # Relationship spaces
+            'entity_relations': EntityGraphEmbeddingSpace(),
+            'temporal_relations': TemporalEmbeddingSpace()
+        }
+        
+        # Cross-space relationships
+        self.space_relationships = SpaceRelationshipGraph()
+
+class SemanticSpace:
+    def __init__(self, dimension: int, context_type: str):
+        self.dimension = dimension
+        self.context_type = context_type
+        self.embedding_model = None
+        self.semantic_properties = {}
+        
+    def embed(self, entity_data):
+        """Project entity data into this semantic space"""
+        raise NotImplementedError
+
+class SpaceRelationshipGraph:
+    def __init__(self):
+        self.space_transitions = {}  # Maps between semantic spaces
+        self.correlation_strengths = {}  # Relationship strengths
+        self.conversion_functions = {}  # Space conversion functions
+```
+
+### 2. Multi-Semantic Integration
+
+```python
+class MultiSemanticProcessor:
+    def __init__(self):
+        self.semantic_integrator = SemanticSpaceIntegrator()
+        self.context_router = ContextualRouter()
+        
+    def process_entity(self, entity: EntityRepresentation, context: str):
+        # Get relevant semantic spaces for context
+        relevant_spaces = self.context_router.get_relevant_spaces(context)
+        
+        # Process entity in each relevant space
+        space_embeddings = {
+            space: self.process_in_space(entity, space)
+            for space in relevant_spaces
+        }
+        
+        # Integrate across semantic spaces
+        return self.semantic_integrator.integrate(space_embeddings, context)
+        
+    def process_in_space(self, entity, semantic_space):
+        """Process entity in specific semantic space"""
+        # Get raw embedding for space
+        base_embedding = semantic_space.embed(entity)
+        
+        # Enrich with contextual information
+        enriched = self.enrich_embedding(base_embedding, semantic_space)
+        
+        # Add relationship information
+        return self.add_relationships(enriched, entity, semantic_space)
+
+class SemanticSpaceIntegrator:
+    def __init__(self):
+        self.integration_strategies = {
+            'commerce': CommercialContextIntegration(),
+            'search': SearchContextIntegration(),
+            'recommendation': RecommendationContextIntegration()
+        }
+        
+    def integrate(self, space_embeddings: Dict, context: str):
+        strategy = self.integration_strategies[context]
+        return strategy.integrate(space_embeddings)
+
+class ContextualRouter:
+    def get_relevant_spaces(self, context: str) -> List[SemanticSpace]:
+        """Determine which semantic spaces are relevant for context"""
+        # Map context to relevant semantic spaces
+        context_space_mapping = {
+            'product_search': [
+                'text',
+                'commerce.order_context',
+                'commerce.cart_context',
+                'recommendation'
+            ],
+            'price_optimization': [
+                'commerce.pricing_context',
+                'regression',
+                'temporal_relations'
+            ]
+        }
+        return context_space_mapping.get(context, [])
+```
+
+### 3. Learning Space Relationships
+
+```python
+class SpaceRelationshipLearner:
+    def __init__(self):
+        self.relationship_detector = CrossSpaceRelationshipDetector()
+        self.transition_learner = SpaceTransitionLearner()
+        
+    def learn_relationships(self, entity_collection: List[EntityRepresentation]):
+        # Detect relationships between spaces
+        relationships = self.relationship_detector.detect(entity_collection)
+        
+        # Learn transition functions
+        transitions = self.transition_learner.learn(relationships)
+        
+        return SpaceRelationshipModel(relationships, transitions)
+
+class CrossSpaceRelationshipDetector:
+    def detect(self, entities: List[EntityRepresentation]):
+        relationships = {}
+        
+        for entity in entities:
+            # Analyze correlations between space embeddings
+            space_correlations = self.compute_space_correlations(entity)
+            
+            # Detect semantic patterns
+            semantic_patterns = self.detect_patterns(entity)
+            
+            # Map cross-space relationships
+            relationships[entity.id] = {
+                'correlations': space_correlations,
+                'patterns': semantic_patterns
+            }
+            
+        return relationships
+```
+
+## Applications and Benefits
+
+### 1. Enhanced Entity Understanding
+- Complete representation across contexts
+- Context-appropriate embedding selection
+- Rich relationship understanding
+
+### 2. Flexible Task Adaptation
+- Natural mapping to various tasks
+- Contextual embedding selection
+- Multi-objective optimization
+
+### 3. Relationship Discovery
+- Cross-space pattern detection
+- Semantic relationship learning
+- Context transfer learning
+
+## Implementation Strategy
+
+### 1. Data Collection
+- Gather entity representations across contexts
+- Record relationship information
+- Track usage patterns
+
+### 2. Space Mapping
+- Define semantic spaces
+- Create transition functions
+- Learn relationship patterns
+
+### 3. Integration
+- Build space integration methods
+- Develop context routing
+- Implement relationship learning
+
+## Research Directions
+
+### 1. Theoretical Foundations
+- Semantic space topology
+- Relationship mathematics
+- Context transition theory
+
+### 2. Algorithmic Development
+- Space integration methods
+- Relationship learning
+- Context routing algorithms
+
+### 3. Applications
+- E-commerce optimization
+- Knowledge representation
+- Search and recommendation
+- Entity understanding
+
+## Technical Challenges
+
+1. **Space Alignment**
+- Maintaining consistency across spaces
+- Handling dimensional differences
+- Preserving semantic relationships
+
+2. **Computational Efficiency**
+- Managing multiple representations
+- Efficient space transitions
+- Context-aware processing
+
+3. **Learning Challenges**
+- Cross-space relationship learning
+- Context boundary detection
+- Semantic drift management
