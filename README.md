@@ -2,6 +2,9 @@
 
 A Python framework for processing long, irregular event sequences and multi-semantic entity relationships. Event-JEPA-Cube addresses limitations of standard Transformer architectures by offering hierarchical temporal processing and supporting multi-modal embeddings within a unified entity representation system.
 
+This repository now includes a lightweight reference implementation of the core
+classes along with a runnable `example.py` demonstrating basic usage.
+
 [![PyPI version](https://badge.fury.io/py/event-jepa-cube.svg)](https://badge.fury.io/py/event-jepa-cube)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/release/python-380/)
@@ -51,6 +54,9 @@ sequence_representation = event_processor.process(
 # Detect patterns
 patterns = event_processor.detect_patterns(sequence_representation)
 ```
+
+The file [`example.py`](example.py) contains a small runnable demonstration of
+these steps.
 
 ## Core Components
 
