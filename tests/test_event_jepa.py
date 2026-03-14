@@ -34,31 +34,29 @@ class TestProcess:
         assert all(isinstance(v, float) for v in result)
 
     def test_process_respects_num_levels(self):
-        # Use non-uniform timestamps so adaptive partitioning creates
-        # multiple windows that get further aggregated at higher levels.
+        # Four clusters with unequal inter-cluster gaps so that adaptive
+        # partitioning produces different windows at each hierarchical level.
         seq = EventSequence(
             embeddings=[
                 [1.0, 0.0, 0.0],
+                [0.9, 0.1, 0.0],
                 [0.0, 1.0, 0.0],
+                [0.1, 0.9, 0.0],
                 [0.0, 0.0, 1.0],
-                [1.0, 1.0, 0.0],
-                [0.0, 1.0, 1.0],
-                [1.0, 0.0, 1.0],
-                [0.5, 0.5, 0.5],
-                [0.0, 0.0, 0.0],
+                [0.1, 0.0, 0.9],
+                [0.5, 0.5, 0.0],
+                [0.4, 0.6, 0.0],
             ],
-            timestamps=[1.0, 1.1, 5.0, 5.1, 10.0, 10.1, 15.0, 15.1],
+            timestamps=[1.0, 1.1, 2.0, 2.1, 10.0, 10.1, 11.0, 11.1],
         )
         result_1 = EventJEPA(embedding_dim=3, num_levels=1).process(seq)
         result_3 = EventJEPA(embedding_dim=3, num_levels=3).process(seq)
-        # Both should produce valid 3-dim representations
-        assert len(result_1) == 3
-        assert len(result_3) == 3
-        # num_levels is used (doesn't crash, produces finite values)
-        assert all(isinstance(v, float) for v in result_3)
+        # With clustered timestamps and multiple levels, representations differ
+        assert result_1 != result_3
 
     def test_process_adaptive_vs_fixed(self):
-        # Many events with irregular spacing so adaptive and fixed partition differently
+        # Irregular spacing where adaptive (gap > median) and fixed
+        # (equal-width time bins) produce different window groupings.
         seq = EventSequence(
             embeddings=[
                 [1.0, 0.0, 0.0],
@@ -67,16 +65,14 @@ class TestProcess:
                 [0.0, 0.0, 1.0],
                 [0.0, 1.0, 0.0],
                 [0.1, 0.9, 0.0],
+                [0.2, 0.8, 0.0],
+                [0.5, 0.5, 0.0],
             ],
-            timestamps=[1.0, 1.5, 2.0, 10.0, 10.5, 11.0],
+            timestamps=[0.0, 0.1, 0.2, 5.0, 5.1, 9.0, 9.1, 10.0],
         )
         adaptive = EventJEPA(embedding_dim=3, temporal_resolution="adaptive").process(seq)
         fixed = EventJEPA(embedding_dim=3, temporal_resolution="fixed").process(seq)
-        # Both should produce valid 3-dim representations
-        assert len(adaptive) == 3
-        assert len(fixed) == 3
-        assert all(isinstance(v, float) for v in adaptive)
-        assert all(isinstance(v, float) for v in fixed)
+        assert adaptive != fixed
 
 
 class TestDetectPatterns:
