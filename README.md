@@ -5,7 +5,6 @@ A Python framework for processing long, irregular event sequences and multi-sema
 This repository now includes a lightweight reference implementation of the core
 classes along with a runnable `example.py` demonstrating basic usage.
 
-[![PyPI version](https://badge.fury.io/py/event-jepa-cube.svg)](https://badge.fury.io/py/event-jepa-cube)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/release/python-380/)
 
@@ -16,12 +15,15 @@ classes along with a runnable `example.py` demonstrating basic usage.
 - **Embedding Cube**: Multi-dimensional embedding space for complex entity relationships
 - **Hierarchical Processing**: Multi-level temporal aggregation for both micro and macro patterns
 - **Multi-Semantic Entities**: Combine textual, visual, behavioral, and other contextual embeddings
+- **JEPA Regularizers**: SIGReg, WeakSIGReg, and RDMReg for structured embedding spaces
 - **Extensible Architecture**: Custom embeddings, relationship models, and hierarchical processors
 
 ## Installation
 
 ```bash
-pip install event-jepa-cube
+pip install event-jepa-cube              # Core (zero dependencies)
+pip install event-jepa-cube[torch]       # With PyTorch for regularizers
+pip install event-jepa-cube[dev]         # Development tools
 ```
 
 ## Quick Start
@@ -29,30 +31,19 @@ pip install event-jepa-cube
 Here's a minimal example to get you started:
 
 ```python
-from event_jepa_cube import EventJEPA, EmbeddingCube
-import pandas as pd
+from event_jepa_cube import EventJEPA, EventSequence
 
-# Load your data
-events_df = pd.read_csv('events.csv')
-embeddings = load_embeddings(events_df['text'])  # Your embedding function
-
-# Initialize Event-JEPA
-event_processor = EventJEPA(
-    embedding_dim=768,
-    num_levels=3
+# Create event sequence from your data
+sequence = EventSequence(
+    embeddings=embeddings,      # List of embedding vectors
+    timestamps=timestamps,       # List of timestamps
+    modality='text'
 )
 
-# Create Embedding Cube
-cube = EmbeddingCube()
-
-# Process event sequence
-sequence_representation = event_processor.process(
-    embeddings=embeddings,
-    timestamps=events_df['timestamp']
-)
-
-# Detect patterns
-patterns = event_processor.detect_patterns(sequence_representation)
+# Process with hierarchical temporal aggregation
+processor = EventJEPA(embedding_dim=768, num_levels=3)
+representation = processor.process(sequence)
+patterns = processor.detect_patterns(representation)
 ```
 
 The file [`example.py`](example.py) contains a small runnable demonstration of
@@ -119,6 +110,34 @@ relationships = cube.discover_relationships(
 )
 ```
 
+## JEPA Regularizers
+
+Event-JEPA-Cube includes regularizers from recent JEPA research to enforce
+structured embedding distributions. These require PyTorch (`pip install event-jepa-cube[torch]`).
+
+```python
+from event_jepa_cube.regularizers import SIGReg, WeakSIGReg, RDMReg
+
+# SIGReg: Enforce isotropic Gaussian distribution (LeJEPA)
+sigreg = SIGReg(num_directions=64, sigma=1.0)
+loss = sigreg.compute_loss(embedding_batch)  # PyTorch tensor
+
+# WeakSIGReg: Covariance regularization for supervised training
+weak = WeakSIGReg(sketch_dim=64)
+loss = weak.compute_loss(embedding_batch)
+
+# RDMReg: Sparse representations via Rectified Generalized Gaussian
+rdmreg = RDMReg(p=2.0, target_sparsity=0.5, num_projections=64)
+loss = rdmreg.compute_loss(embedding_batch)
+
+# Integrate with EventJEPA
+processor = EventJEPA(
+    embedding_dim=768,
+    regularizer=sigreg,
+    reg_weight=0.05
+)
+```
+
 ## Advanced Usage
 
 ### Custom Embedding Types
@@ -132,12 +151,10 @@ from event_jepa_cube import register_embedding_type
 class CustomEmbedding:
     def __init__(self, dim):
         self.dim = dim
-        
+
     def process(self, data):
         # Your custom embedding logic
         return embeddings
-
-processor = EventJEPA(embedding_types=['text', 'custom'])
 ```
 
 ### Custom Relationship Models
@@ -152,7 +169,7 @@ class CustomRelationshipModel(nn.Module):
     def __init__(self, input_dim, output_dim):
         super().__init__()
         self.transform = nn.Linear(input_dim, output_dim)
-        
+
     def forward(self, x):
         return self.transform(x)
 
@@ -162,6 +179,10 @@ cube.add_model('custom_relationship', CustomRelationshipModel(768, 128))
 ## Technical Architecture
 
 ### Performance Benchmarks
+
+> **Note:** The figures below are theoretical targets based on the JEPA
+> architecture's structural advantages over token-based Transformers. They are
+> not measured benchmarks of this specific library.
 
 | Metric | Traditional (Token-Based) | Event-JEPA-Cube | Improvement |
 |--------|-------------------------|-----------------|-------------|
@@ -174,7 +195,7 @@ cube.add_model('custom_relationship', CustomRelationshipModel(768, 128))
 
 - Handles 5K+ events efficiently (equivalent to tens of thousands of tokens)
 - Native multi-modal support without forced alignment
-- Memory efficient: O(m log m) vs O(n²) in traditional Transformers
+- Memory efficient: O(m log m) vs O(n^2) in traditional Transformers
 - Intelligent temporal processing for irregular timestamps
 
 ## Industry Applications
@@ -183,6 +204,14 @@ cube.add_model('custom_relationship', CustomRelationshipModel(768, 128))
 - **Healthcare**: Patient journey analysis, treatment optimization, resource allocation
 - **Manufacturing/IoT**: Predictive maintenance, anomaly detection, supply chain events
 - **Security**: Intrusion detection, access pattern analysis, fraud detection
+
+## References
+
+The regularizer implementations are based on the following papers:
+
+- **LeJEPA** (SIGReg): [arXiv:2511.08544](https://arxiv.org/abs/2511.08544)
+- **Weak-SIGReg**: [arXiv:2603.05924](https://arxiv.org/abs/2603.05924)
+- **Rectified LpJEPA** (RDMReg): [arXiv:2602.01456](https://arxiv.org/abs/2602.01456)
 
 ## Contributing
 
@@ -199,11 +228,11 @@ If you use Event-JEPA-Cube in your research, please cite:
 
 ```bibtex
 @software{event_jepa_cube2024,
-  author = {Authors},
+  author = {Agourakis, Dionisio Chiuratto},
   title = {Event-JEPA-Cube: Event Sequence Processing and Entity Relationships},
   year = {2024},
   publisher = {GitHub},
-  url = {https://github.com/username/event-jepa-cube}
+  url = {https://github.com/josaum/jcube}
 }
 ```
 
