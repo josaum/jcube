@@ -455,6 +455,27 @@ class DuckDBConnector:
                 conn.execute(f"INSERT INTO {safe} VALUES ($1, $2)", [eid, rid])
 
     # ------------------------------------------------------------------
+    # Single-sequence processing (used by triggers)
+    # ------------------------------------------------------------------
+
+    def process_sequence(
+        self, sequence_id: str, sequence: EventSequence, num_prediction_steps: int = 3
+    ) -> dict[str, Any]:
+        """Run the pipeline for a single sequence and return results.
+
+        Returns:
+            Dict with keys ``sequence_id``, ``representation``, ``patterns``,
+            ``predictions``.
+        """
+        rep = self._jepa.process(sequence)
+        return {
+            "sequence_id": sequence_id,
+            "representation": rep,
+            "patterns": self._jepa.detect_patterns(rep),
+            "predictions": self._jepa.predict_next(sequence, num_prediction_steps),
+        }
+
+    # ------------------------------------------------------------------
     # Pipeline
     # ------------------------------------------------------------------
 

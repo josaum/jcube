@@ -29,3 +29,11 @@ try:
     __all__ += ["DuckDBConnector"]
 except ImportError:
     pass
+
+# Trigger engine is optional (requires duckdb)
+try:
+    from .triggers import AlertRule, StopHandle, TriggerEngine, register_action
+
+    __all__ += ["TriggerEngine", "AlertRule", "StopHandle", "register_action"]
+except ImportError:
+    pass
