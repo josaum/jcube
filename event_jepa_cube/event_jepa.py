@@ -1,9 +1,11 @@
 """Simplified Event-JEPA processor."""
+
 from __future__ import annotations
 
 import math
 import statistics
-from typing import Callable, Iterable, List, Optional
+from collections.abc import Iterable
+from typing import Callable, List, Optional
 
 from .sequence import EventSequence
 

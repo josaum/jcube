@@ -37,3 +37,11 @@ try:
     __all__ += ["TriggerEngine", "AlertRule", "StopHandle", "register_action"]
 except ImportError:
     pass
+
+# Cascade pipeline is optional (requires duckdb)
+try:
+    from .cascade import CascadeLevel, ForecastCascade
+
+    __all__ += ["CascadeLevel", "ForecastCascade"]
+except ImportError:
+    pass

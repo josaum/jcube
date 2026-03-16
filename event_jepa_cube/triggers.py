@@ -146,12 +146,16 @@ class TriggerEngine:
         sequences_table: str = "event_sequences",
         column_map: dict[str, str] | None = None,
         num_prediction_steps: int = 3,
+        table_prefix: str = "",
     ) -> None:
         _require_duckdb()
         self._connector = connector
         self._sequences_table = sequences_table
         self._column_map = column_map
         self._num_prediction_steps = num_prediction_steps
+        self._table_prefix = table_prefix
+        self._alerts_table = f"{table_prefix}_alerts" if table_prefix else "_alerts"
+        self._predictions_table = f"{table_prefix}_predictions_live" if table_prefix else "_predictions_live"
         self._rules: dict[str, AlertRule] = {}
         self._actions: dict[str, Callable[[dict[str, Any]], None]] = {}
         self._high_water_mark: float = 0.0
@@ -166,8 +170,10 @@ class TriggerEngine:
         if self._initialized:
             return
         conn = self._connector._ensure_open()
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS _alerts (
+        alerts_t = _validate_identifier(self._alerts_table)
+        preds_t = _validate_identifier(self._predictions_table)
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS {alerts_t} (
                 alert_id VARCHAR,
                 sequence_id VARCHAR,
                 rule_name VARCHAR,
@@ -177,8 +183,8 @@ class TriggerEngine:
                 pipeline_result VARCHAR
             )
         """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS _predictions_live (
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS {preds_t} (
                 sequence_id VARCHAR,
                 step INTEGER,
                 prediction FLOAT[],
@@ -267,8 +273,9 @@ class TriggerEngine:
             {k: v for k, v in result.items() if k != "representation"},
             default=str,
         )
+        alerts_t = _validate_identifier(self._alerts_table)
         conn.execute(
-            'INSERT INTO "_alerts" VALUES ($1, $2, $3, $4, $5, $6, $7)',
+            f"INSERT INTO {alerts_t} VALUES ($1, $2, $3, $4, $5, $6, $7)",
             [alert_id, result["sequence_id"], rule.name, rule.severity, message, fired_at, result_json],
         )
 
@@ -287,10 +294,11 @@ class TriggerEngine:
         """Upsert live predictions for a sequence (delete old + insert new)."""
         conn = self._connector._ensure_open()
         now = time.time()
-        conn.execute('DELETE FROM "_predictions_live" WHERE sequence_id = $1', [sequence_id])
+        preds_t = _validate_identifier(self._predictions_table)
+        conn.execute(f"DELETE FROM {preds_t} WHERE sequence_id = $1", [sequence_id])
         for step, pred in enumerate(predictions, start=1):
             conn.execute(
-                'INSERT INTO "_predictions_live" VALUES ($1, $2, $3, $4)',
+                f"INSERT INTO {preds_t} VALUES ($1, $2, $3, $4)",
                 [sequence_id, step, pred, now],
             )
 
@@ -424,13 +432,14 @@ class TriggerEngine:
         """
         self._ensure_tables()
         conn = self._connector._ensure_open()
+        alerts_t = _validate_identifier(self._alerts_table)
         if sequence_id:
             rows = conn.execute(
-                'SELECT * FROM "_alerts" WHERE sequence_id = $1 ORDER BY fired_at DESC LIMIT $2',
+                f"SELECT * FROM {alerts_t} WHERE sequence_id = $1 ORDER BY fired_at DESC LIMIT $2",
                 [sequence_id, limit],
             ).fetchall()
         else:
-            rows = conn.execute(f'SELECT * FROM "_alerts" ORDER BY fired_at DESC LIMIT {limit}').fetchall()
+            rows = conn.execute(f"SELECT * FROM {alerts_t} ORDER BY fired_at DESC LIMIT {limit}").fetchall()
         cols = ["alert_id", "sequence_id", "rule_name", "severity", "message", "fired_at", "pipeline_result"]
         return [dict(zip(cols, row)) for row in rows]
 
@@ -442,8 +451,9 @@ class TriggerEngine:
         """
         self._ensure_tables()
         conn = self._connector._ensure_open()
+        preds_t = _validate_identifier(self._predictions_table)
         rows = conn.execute(
-            'SELECT prediction FROM "_predictions_live" WHERE sequence_id = $1 ORDER BY step',
+            f"SELECT prediction FROM {preds_t} WHERE sequence_id = $1 ORDER BY step",
             [sequence_id],
         ).fetchall()
         return [[float(v) for v in row[0]] for row in rows]

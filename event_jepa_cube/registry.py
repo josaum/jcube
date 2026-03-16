@@ -1,4 +1,5 @@
 """Simple registries for embeddings and models."""
+
 from typing import Callable, Dict
 
 _embedding_registry: Dict[str, Callable] = {}

@@ -6,6 +6,7 @@ Weak-SIGReg (arXiv:2603.05924), and Rectified LpJEPA (arXiv:2602.01456).
 
 Requires PyTorch. Install with: pip install event-jepa-cube[torch]
 """
+
 from __future__ import annotations
 
 import math
@@ -14,6 +15,7 @@ from typing import Optional
 try:
     import torch
     from torch import Tensor
+
     _TORCH_AVAILABLE = True
 except ImportError:
     _TORCH_AVAILABLE = False
@@ -22,9 +24,7 @@ except ImportError:
 
 def _require_torch() -> None:
     if not _TORCH_AVAILABLE:
-        raise ImportError(
-            "PyTorch is required for regularizers. Install with: pip install event-jepa-cube[torch]"
-        )
+        raise ImportError("PyTorch is required for regularizers. Install with: pip install event-jepa-cube[torch]")
 
 
 class SIGReg:
@@ -93,15 +93,15 @@ class SIGReg:
         ecf_imag = torch.sin(phases).mean(dim=0)  # (T,)
 
         # Theoretical Gaussian CF: phi(t) = exp(-t^2/2)
-        gcf = torch.exp(-0.5 * t_points ** 2)
+        gcf = torch.exp(-0.5 * t_points**2)
 
         # |phi_hat(t) - phi(t)|^2
         diff_real = ecf_real - gcf
         diff_imag = ecf_imag  # Gaussian CF is real, so imaginary part is just ecf_imag
-        diff_sq = diff_real ** 2 + diff_imag ** 2
+        diff_sq = diff_real**2 + diff_imag**2
 
         # Weighting: w(t) = exp(-t^2/sigma^2)
-        weight = torch.exp(-t_points ** 2 / (self.sigma ** 2))
+        weight = torch.exp(-(t_points**2) / (self.sigma**2))
 
         # Trapezoidal integration
         integrand = diff_sq * weight
@@ -259,9 +259,7 @@ class RDMReg:
             # Shift distribution so that target_sparsity fraction falls below zero
             # For Gaussian: mu = -Phi^{-1}(1 - sparsity) where Phi is normal CDF
             # Approximate using probit function
-            mu = -math.sqrt(2) * torch.erfinv(
-                torch.tensor(1.0 - 2.0 * self.target_sparsity)
-            ).item()
+            mu = -math.sqrt(2) * torch.erfinv(torch.tensor(1.0 - 2.0 * self.target_sparsity)).item()
             samples = samples + mu
 
         # Rectify: apply ReLU (max(0, x))

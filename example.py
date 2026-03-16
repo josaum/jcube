@@ -1,7 +1,8 @@
 """Minimal usage example for Event-JEPA-Cube."""
+
 from event_jepa_cube import (
-    Entity,
     EmbeddingCube,
+    Entity,
     EventJEPA,
     EventSequence,
 )
