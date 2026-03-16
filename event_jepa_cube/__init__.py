@@ -45,3 +45,8 @@ try:
     __all__ += ["CascadeLevel", "ForecastCascade"]
 except ImportError:
     pass
+
+# Mycelia store connector (no external deps — uses stdlib urllib)
+from .mycelia_store import MyceliaError, MyceliaStore
+
+__all__ += ["MyceliaStore", "MyceliaError"]
