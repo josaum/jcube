@@ -13,3 +13,11 @@ __all__ = [
     "register_embedding_type",
     "register_model",
 ]
+
+# Regularizers are optional (require PyTorch)
+try:
+    from .regularizers import SIGReg, WeakSIGReg, RDMReg
+
+    __all__ += ["SIGReg", "WeakSIGReg", "RDMReg"]
+except ImportError:
+    pass
