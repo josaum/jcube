@@ -1,4 +1,5 @@
 """Smoke test for the example script."""
+
 from example import main
 
 

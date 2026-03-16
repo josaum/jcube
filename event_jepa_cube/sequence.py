@@ -1,7 +1,9 @@
 """Data structures for sequences and entities."""
+
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, List
-import uuid
+
 
 @dataclass
 class EventSequence:
@@ -14,6 +16,7 @@ class EventSequence:
     def __post_init__(self) -> None:
         if len(self.embeddings) != len(self.timestamps):
             raise ValueError("Embeddings and timestamps must have the same length")
+
 
 @dataclass
 class Entity:

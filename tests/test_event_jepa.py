@@ -1,4 +1,5 @@
 """Tests for EventJEPA processor."""
+
 import pytest
 
 from event_jepa_cube.event_jepa import EventJEPA

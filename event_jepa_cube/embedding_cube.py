@@ -1,11 +1,13 @@
 """Simple implementation of the Embedding Cube."""
+
 from __future__ import annotations
 
 import math
-from typing import Any, Dict, Iterable, List
+from collections.abc import Iterable
+from typing import Any, Dict, List
 
-from .sequence import Entity
 from .registry import get_model
+from .sequence import Entity
 
 
 class EmbeddingCube:
@@ -71,10 +73,7 @@ class EmbeddingCube:
                 if not shared:
                     continue
 
-                sims = [
-                    self._cosine_similarity(entity_a.embeddings[mod], entity_b.embeddings[mod])
-                    for mod in shared
-                ]
+                sims = [self._cosine_similarity(entity_a.embeddings[mod], entity_b.embeddings[mod]) for mod in shared]
                 avg_sim = sum(sims) / len(sims)
 
                 # Hierarchy bonus

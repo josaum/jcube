@@ -2,6 +2,7 @@
 
 Skipped entirely if PyTorch is not available.
 """
+
 import pytest
 
 torch = pytest.importorskip("torch")

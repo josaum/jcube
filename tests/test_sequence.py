@@ -1,4 +1,5 @@
 """Tests for EventSequence and Entity data structures."""
+
 import uuid
 
 import pytest

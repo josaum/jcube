@@ -1,7 +1,6 @@
 """Tests for the embedding and model registries."""
+
 from event_jepa_cube.registry import (
-    _embedding_registry,
-    _model_registry,
     get_embedding_type,
     get_model,
     register_embedding_type,

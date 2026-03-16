@@ -1,4 +1,5 @@
 """Tests for EmbeddingCube."""
+
 import math
 
 import pytest

@@ -26,8 +26,11 @@ dependencies = []
 
 [project.optional-dependencies]
 torch = ["torch>=2.0"]
+duckdb = ["duckdb>=1.0.0"]
+duckdb-arrow = ["duckdb>=1.0.0", "pyarrow>=14.0", "adbc-driver-duckdb>=0.9.0"]
+mycelia-arrow = ["pyarrow>=14.0"]
 dev = ["pytest>=7.0", "pytest-cov", "ruff", "mypy"]
-all = ["event-jepa-cube[torch,dev]"]
+all = ["event-jepa-cube[torch,duckdb,duckdb-arrow,mycelia-arrow,dev]"]
 
 [project.urls]
 Homepage = "https://github.com/josaum/jcube"
