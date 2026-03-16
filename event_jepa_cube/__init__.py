@@ -22,6 +22,14 @@ try:
 except ImportError:
     pass
 
+# Predictors are optional (require PyTorch)
+try:
+    from .predictors import MLPPredictor, PredictorTrainer, TransformerPredictor
+
+    __all__ += ["MLPPredictor", "TransformerPredictor", "PredictorTrainer"]
+except ImportError:
+    pass
+
 # DuckDB connector is optional (requires duckdb)
 try:
     from .duckdb_connector import DuckDBConnector
@@ -50,3 +58,34 @@ except ImportError:
 from .mycelia_store import MyceliaError, MyceliaStore
 
 __all__ += ["MyceliaStore", "MyceliaError"]
+
+# Streaming JEPA (no external deps)
+from .streaming import StreamBuffer, StreamingJEPA
+
+__all__ += ["StreamingJEPA", "StreamBuffer"]
+
+# Bandit client (no external deps — uses stdlib urllib)
+from .bandit import BanditClient, BanditError, CascadeBandit
+
+__all__ += ["BanditClient", "BanditError", "CascadeBandit"]
+
+# GEPA search (no external deps — uses stdlib urllib)
+from .gepa import GEPAError, GEPAResult, GEPASearch
+
+__all__ += ["GEPASearch", "GEPAResult", "GEPAError"]
+
+# Arrow Flight transfer is optional (requires pyarrow)
+try:
+    from .flight_transfer import FlightTransfer
+
+    __all__ += ["FlightTransfer"]
+except ImportError:
+    pass
+
+# Pipeline orchestrator is optional (requires duckdb)
+try:
+    from .orchestrator import Pipeline, PipelineError
+
+    __all__ += ["Pipeline", "PipelineError"]
+except ImportError:
+    pass
