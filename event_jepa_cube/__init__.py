@@ -66,6 +66,11 @@ from .streaming import StreamBuffer, StreamingJEPA
 
 __all__ += ["StreamingJEPA", "StreamBuffer"]
 
+# Numpy-accelerated ops and mmap store (numpy optional)
+from .numpy_ops import HAS_NUMPY, MmapEmbeddingStore
+
+__all__ += ["HAS_NUMPY", "MmapEmbeddingStore"]
+
 # Bandit client (no external deps — uses stdlib urllib)
 from .bandit import BanditClient, BanditError, CascadeBandit
 

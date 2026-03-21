@@ -1,10 +1,16 @@
-"""Online/incremental EventJEPA processing with streaming support."""
+"""Online/incremental EventJEPA processing with streaming support.
+
+Uses numpy-accelerated operations when available, with pure-Python fallback.
+Includes mmap-backed storage for large sliding windows.
+"""
 
 from __future__ import annotations
 
 import math
 from collections import deque
+from typing import Optional
 
+from . import numpy_ops as npo
 from .sequence import EventSequence
 
 
@@ -15,8 +21,8 @@ class StreamingJEPA:
     instead of O(n) full reprocessing. Uses exponential moving averages
     and online statistics for pattern detection.
 
-    The representation converges to the same result as batch EventJEPA
-    for large sequences, with bounded approximation error for small ones.
+    When numpy is available, update_batch() uses vectorized operations
+    for significant speedups on batches.
     """
 
     def __init__(
@@ -25,12 +31,6 @@ class StreamingJEPA:
         alpha: float = 1.0,
         window_size: int | None = None,
     ) -> None:
-        """
-        Args:
-            embedding_dim: Dimension of embedding vectors.
-            alpha: Exponential decay rate for temporal weighting.
-            window_size: Optional sliding window size. If None, uses all history.
-        """
         self.embedding_dim = embedding_dim
         self.alpha = alpha
         self.window_size = window_size
@@ -47,23 +47,8 @@ class StreamingJEPA:
         self._recent_timestamps: deque[float] = deque(maxlen=maxlen)
 
     def update(self, embedding: list[float], timestamp: float) -> list[float]:
-        """Process a single new event and return updated representation.
-
-        Uses exponential moving average weighted by time delta:
-        weight = exp(-alpha * (t_new - t_last))
-        new_repr = weight * old_repr + (1 - weight) * new_embedding
-
-        Also updates online statistics (Welford's) for pattern detection.
-
-        Args:
-            embedding: New event embedding vector.
-            timestamp: Event timestamp.
-
-        Returns:
-            Updated representation vector.
-        """
+        """Process a single new event and return updated representation."""
         if self._count == 0:
-            # First event: representation is the embedding itself
             self._representation = list(embedding)
         else:
             dt = timestamp - self._last_timestamp if self._last_timestamp is not None else 0.0
@@ -87,25 +72,44 @@ class StreamingJEPA:
         return list(self._representation)
 
     def update_batch(self, embeddings: list[list[float]], timestamps: list[float]) -> list[float]:
-        """Process multiple events sequentially, return final representation."""
-        result: list[float] = []
+        """Process multiple events with vectorized EMA + Welford stats.
+
+        Unlike sequential update(), this uses numpy (when available) to
+        vectorize the per-dimension operations within each event.
+        """
+        if not embeddings:
+            return []
+
+        repr_out, last_ts, new_count, new_mean, new_m2 = npo.streaming_ema_batch(
+            self._representation,
+            embeddings,
+            timestamps,
+            self.alpha,
+            self._last_timestamp,
+            self._count,
+            self._running_mean,
+            self._running_m2,
+        )
+
+        self._representation = repr_out
+        self._last_timestamp = last_ts
+        self._count = new_count
+        self._running_mean = new_mean
+        self._running_m2 = new_m2
+
+        # Update sliding window
         for emb, ts in zip(embeddings, timestamps):
-            result = self.update(emb, ts)
-        return result
+            self._recent_embeddings.append(list(emb))
+            self._recent_timestamps.append(ts)
+
+        return list(self._representation)
 
     def get_representation(self) -> list[float]:
         """Return current representation without processing new events."""
         return list(self._representation)
 
     def detect_patterns(self) -> list[int]:
-        """Detect salient dimensions using online statistics.
-
-        Uses Welford's running mean/variance for z-score computation
-        without needing to store all historical embeddings.
-
-        Dimensions with |z| > 1.5 are considered salient. If fewer than 2
-        dimensions pass the threshold, falls back to top-5 by magnitude.
-        """
+        """Detect salient dimensions using online statistics."""
         if self._count < 2:
             return list(range(min(5, self.embedding_dim)))
 
@@ -131,48 +135,16 @@ class StreamingJEPA:
         return sorted(salient)
 
     def predict_next(self, num_steps: int = 1) -> list[list[float]]:
-        """Predict next embeddings using recent trend.
-
-        Uses the sliding window of recent embeddings for trend estimation
-        via exponentially-weighted moving deltas.
-        """
+        """Predict next embeddings using recent trend."""
         recent = list(self._recent_embeddings)
         if not recent:
             return []
         if len(recent) < 2:
             return [list(recent[-1]) for _ in range(num_steps)]
 
-        dim = len(recent[0])
         recent_ts = list(self._recent_timestamps)
-
-        # Compute deltas between consecutive recent embeddings
-        deltas: list[list[float]] = []
-        delta_times: list[float] = []
-        for j in range(1, len(recent)):
-            delta = [recent[j][d] - recent[j - 1][d] for d in range(dim)]
-            deltas.append(delta)
-            delta_times.append(recent_ts[j])
-
-        # Exponential weighting by recency
-        t_max = max(delta_times)
-        weights = [math.exp(-self.alpha * (t_max - t)) for t in delta_times]
-        total_w = sum(weights)
-        if total_w == 0.0:
-            total_w = 1.0
-
-        trend = [0.0] * dim
-        for delta, w in zip(deltas, weights):
-            for d in range(dim):
-                trend[d] += delta[d] * w
-        trend = [v / total_w for v in trend]
-
-        # Extrapolate from last embedding
-        last = recent[-1]
-        predictions: list[list[float]] = []
-        for step in range(1, num_steps + 1):
-            pred = [last[d] + trend[d] * step for d in range(dim)]
-            predictions.append(pred)
-        return predictions
+        trend = npo.compute_trend(recent, recent_ts, alpha=self.alpha)
+        return npo.extrapolate(recent[-1], trend, num_steps)
 
     def reset(self) -> None:
         """Reset all internal state."""
@@ -196,11 +168,7 @@ class StreamingJEPA:
         return self._last_timestamp
 
     def snapshot(self) -> dict[str, object]:
-        """Capture current state as a serializable dict.
-
-        Returns dict with representation, count, statistics --
-        can be stored and restored.
-        """
+        """Capture current state as a serializable dict."""
         return {
             "embedding_dim": self.embedding_dim,
             "alpha": self.alpha,
@@ -246,48 +214,32 @@ class StreamingJEPA:
         alpha: float = 1.0,
         window_size: int | None = None,
     ) -> StreamingJEPA:
-        """Initialize from an existing EventSequence (warm start).
-
-        Processes the full sequence to establish state, then ready
-        for incremental updates.
-
-        Args:
-            sequence: EventSequence to initialize from.
-            embedding_dim: Dimension of embedding vectors.
-            alpha: Exponential decay rate for temporal weighting.
-            window_size: Optional sliding window size.
-        """
+        """Initialize from an existing EventSequence (warm start)."""
         if sequence.embeddings:
             embedding_dim = len(sequence.embeddings[0])
 
         instance = cls(embedding_dim=embedding_dim, alpha=alpha, window_size=window_size)
 
-        # Sort by timestamp and process in order
+        if not sequence.embeddings:
+            return instance
+
+        # Sort by timestamp and process as batch
         order = sorted(range(len(sequence.timestamps)), key=lambda i: sequence.timestamps[i])
-        for i in order:
-            instance.update(sequence.embeddings[i], sequence.timestamps[i])
+        sorted_embs = [sequence.embeddings[i] for i in order]
+        sorted_ts = [sequence.timestamps[i] for i in order]
+        instance.update_batch(sorted_embs, sorted_ts)
 
         return instance
 
 
 class StreamBuffer:
-    """Accumulates streaming events and periodically flushes to batch processing.
-
-    Bridges streaming and batch worlds: collects events in a buffer,
-    and when a flush condition is met (count or time threshold),
-    yields an EventSequence for batch pipeline processing.
-    """
+    """Accumulates streaming events and periodically flushes to batch processing."""
 
     def __init__(
         self,
         flush_count: int = 100,
         flush_interval: float | None = None,
     ) -> None:
-        """
-        Args:
-            flush_count: Flush when this many events accumulate.
-            flush_interval: Flush when this many seconds elapse since last flush.
-        """
         self.flush_count = flush_count
         self.flush_interval = flush_interval
 
@@ -307,11 +259,9 @@ class StreamBuffer:
         self._timestamps.append(timestamp)
         self._modality = modality
 
-        # Check flush_count trigger
         if len(self._embeddings) >= self.flush_count:
             return self._do_flush()
 
-        # Check flush_interval trigger
         if self.flush_interval is not None:
             if self._last_flush_time is None:
                 self._last_flush_time = timestamp

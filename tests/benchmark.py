@@ -256,10 +256,69 @@ def main() -> None:
     bench_streaming_batch_vs_sequential(dim, 2000)
     bench_streaming_convergence(dim)
     bench_embedding_cube(dim)
+    bench_embedding_cube_batch(dim)
+    bench_mmap_store(dim)
     bench_memory_large_sequence(dim, args.max_seq)
 
     print("\n" + "=" * 80)
     print("Done.")
+
+
+def bench_embedding_cube_batch(dim: int) -> None:
+    """EmbeddingCube batch vs standard relationship discovery."""
+    print(f"\n== EmbeddingCube batch discovery  dim={dim} ==")
+    from event_jepa_cube import Entity
+
+    cube = EmbeddingCube()
+    entities = []
+    for i in range(200):
+        e = Entity(embeddings={"text": _rand_embedding(dim), "visual": _rand_embedding(dim)})
+        entities.append(e)
+        cube.add_entity(e)
+
+    ids = [e.id for e in entities[:50]]
+    r_std = _bench("discover_relationships (standard)", lambda: cube.discover_relationships(ids, threshold=0.3), 20)
+    r_bat = _bench("discover_relationships_batch", lambda: cube.discover_relationships_batch(ids, threshold=0.3), 20)
+    _print_result(r_std)
+    _print_result(r_bat)
+    if r_bat.per_iter_ms > 0:
+        print(f"  Batch speedup: {r_std.per_iter_ms / r_bat.per_iter_ms:.2f}x")
+
+
+def bench_mmap_store(dim: int) -> None:
+    """MmapEmbeddingStore throughput."""
+    from event_jepa_cube.numpy_ops import MmapEmbeddingStore
+
+    print(f"\n== MmapEmbeddingStore  dim={dim} ==")
+    n = 10000
+    embs = [_rand_embedding(dim) for _ in range(n)]
+    ts = [float(i) for i in range(n)]
+
+    def write_sequential():
+        store = MmapEmbeddingStore(dim)
+        for emb, t in zip(embs, ts):
+            store.append(emb, t)
+        store.close()
+
+    def write_batch():
+        store = MmapEmbeddingStore(dim)
+        store.append_batch(embs, ts)
+        store.close()
+
+    def read_all():
+        store = MmapEmbeddingStore(dim)
+        store.append_batch(embs, ts)
+        _ = store.get_embeddings()
+        store.close()
+
+    r_seq = _bench(f"sequential write {n}", write_sequential, 5)
+    r_bat = _bench(f"batch write {n}", write_batch, 5)
+    r_read = _bench(f"read all {n}", read_all, 5)
+    _print_result(r_seq)
+    _print_result(r_bat)
+    _print_result(r_read)
+    if r_bat.per_iter_ms > 0:
+        print(f"  Batch write speedup: {r_seq.per_iter_ms / r_bat.per_iter_ms:.2f}x")
 
 
 if __name__ == "__main__":
