@@ -4,6 +4,7 @@ from .embedding_cube import EmbeddingCube
 from .event_jepa import EventJEPA
 from .registry import register_embedding_type, register_model
 from .sequence import Entity, EventSequence
+from .training import CooldownSchedule
 
 __all__ = [
     "EventSequence",
@@ -12,6 +13,7 @@ __all__ = [
     "EmbeddingCube",
     "register_embedding_type",
     "register_model",
+    "CooldownSchedule",
 ]
 
 # Regularizers are optional (require PyTorch)
@@ -63,6 +65,11 @@ __all__ += ["MyceliaStore", "MyceliaError"]
 from .streaming import StreamBuffer, StreamingJEPA
 
 __all__ += ["StreamingJEPA", "StreamBuffer"]
+
+# Numpy-accelerated ops and mmap store (numpy optional)
+from .numpy_ops import HAS_NUMPY, MmapEmbeddingStore
+
+__all__ += ["HAS_NUMPY", "MmapEmbeddingStore"]
 
 # Bandit client (no external deps — uses stdlib urllib)
 from .bandit import BanditClient, BanditError, CascadeBandit
