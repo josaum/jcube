@@ -258,12 +258,18 @@ class EventJEPA:
 
         trend = npo.compute_trend(embeddings, timestamps, alpha=1.0)
 
+        # Normalize dt to "steps" — trend is per-step, not per-second
+        n = len(timestamps)
+        avg_interval = (timestamps[-1] - timestamps[0]) / max(n - 1, 1)
+        if avg_interval == 0.0:
+            avg_interval = 1.0
+
         # Predict at each target timestamp with position-modulated trend
         predictions: List[List[float]] = []
         for target_t in target_timestamps:
-            dt = target_t - last_t
-            pos_enc = npo.temporal_position_encoding(dt, dim)
-            pred = [last[d] + trend[d] * dt * (1.0 + 0.1 * pos_enc[d]) for d in range(dim)]
+            dt_steps = (target_t - last_t) / avg_interval
+            pos_enc = npo.temporal_position_encoding(target_t - last_t, dim)
+            pred = [last[d] + trend[d] * dt_steps * (1.0 + 0.1 * pos_enc[d]) for d in range(dim)]
             predictions.append(pred)
         return predictions
 

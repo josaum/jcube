@@ -28,10 +28,15 @@ dependencies = []
 numpy = ["numpy>=1.24"]
 torch = ["torch>=2.0"]
 duckdb = ["duckdb>=1.0.0"]
-duckdb-arrow = ["duckdb>=1.0.0", "pyarrow>=14.0", "adbc-driver-duckdb>=0.9.0"]
+duckdb-arrow = ["duckdb>=1.0.0", "pyarrow>=14.0"]
 mycelia-arrow = ["pyarrow>=14.0"]
+twin = ["duckdb>=1.0.0", "pyarrow>=14.0", "fastapi>=0.100", "uvicorn>=0.20"]
+train = ["torch>=2.0", "transformers>=4.40", "peft>=0.10", "accelerate>=0.25", "duckdb>=1.0.0", "pyarrow>=14.0"]
 dev = ["pytest>=7.0", "pytest-cov", "ruff", "mypy"]
-all = ["event-jepa-cube[numpy,torch,duckdb,duckdb-arrow,mycelia-arrow,dev]"]
+all = ["event-jepa-cube[numpy,torch,duckdb,duckdb-arrow,mycelia-arrow,twin,train,dev]"]
+
+[project.scripts]
+digital-twin = "event_jepa_cube.twin_api:main"
 
 [project.urls]
 Homepage = "https://github.com/josaum/jcube"

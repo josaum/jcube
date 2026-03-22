@@ -96,3 +96,19 @@ try:
     __all__ += ["Pipeline", "PipelineError"]
 except ImportError:
     pass
+
+# Digital Twin is optional (requires duckdb + pyarrow)
+try:
+    from .digital_twin import DigitalTwin, TwinSnapshot
+
+    __all__ += ["DigitalTwin", "TwinSnapshot"]
+except ImportError:
+    pass
+
+# Materializer is optional (requires duckdb + pyarrow)
+try:
+    from .materializer import Materializer, MaterializationResult
+
+    __all__ += ["Materializer", "MaterializationResult"]
+except ImportError:
+    pass
