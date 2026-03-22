@@ -472,7 +472,7 @@ def train_on_gpu(
 
 
 # ---------------------------------------------------------------------------
-# GPU: LoRA fine-tune + JEPA with lookahead
+# GPU: LoRA fine-tune + JEPA with temporal aggregation (v2 architecture)
 # ---------------------------------------------------------------------------
 
 
@@ -485,7 +485,9 @@ def train_on_gpu(
 def train_lora_jepa(
     flat_texts: list[str],
     flat_ts: list[float],
+    flat_entity_types: list[str],
     entity_ranges: dict[str, list[int]],
+    primary_entity_types: dict[str, str],
     model_name: str = "Qwen/Qwen3.5-0.8B",
     embedding_dim: int = 64,
     max_length: int = 512,
@@ -495,23 +497,30 @@ def train_lora_jepa(
     lora_epochs: int = 2,
     lora_lr: float = 2e-5,
     lora_batch_size: int = 8,
+    temporal_coherence_weight: float = 0.1,
     # JEPA config
     jepa_steps: int = 5000,
     jepa_batch_size: int = 32,
     jepa_lr: float = 3e-4,
+    temporal_alpha: float = 1.0,
     # Lookahead
     lookahead_steps: int = 5,
     lookahead_decay: float = 0.7,
+    context_length: int = 32,
 ) -> dict:
-    """Full pipeline: LoRA fine-tune → extract → JEPA + lookahead.
+    """Full pipeline: LoRA fine-tune → extract → JEPA w/ temporal aggregation.
 
-    Phase A: LoRA fine-tune on domain text (causal LM loss)
+    Architecture fixes over v1:
+    - Exponential-decay temporal aggregation (replaces mean pooling)
+    - WeakSIGReg regularization (replaces toy cov/var)
+    - TransformerPredictor for multi-step lookahead (replaces MLP+scalar)
+    - Temporal coherence auxiliary loss in LoRA phase
+    - Downstream evaluation metrics
+
+    Phase A: LoRA fine-tune on domain text (CLM + temporal coherence)
     Phase B: Extract hidden states from LoRA-adapted model
-    Phase C: Train projection + predictor with JEPA + multi-step lookahead
-
-    The lookahead loss predicts representations at t+1, t+2, ..., t+K,
-    weighted by exponential decay. This captures longer-range temporal
-    dependencies in the latent space.
+    Phase C: Train projection + TransformerPredictor with JEPA objective
+    Phase D: Evaluate embedding quality
     """
     import copy
     import math
@@ -520,6 +529,7 @@ def train_lora_jepa(
 
     import torch
     import torch.nn as nn
+    import torch.nn.functional as F
 
     device = "cuda"
     random.seed(42)
@@ -527,17 +537,126 @@ def train_lora_jepa(
 
     n_events = len(flat_texts)
     n_entities = len(entity_ranges)
-    print(f"=== LoRA-JEPA Training on A100-80GB ===")
+    print(f"=== LoRA-JEPA v2 Training on A100-80GB ===")
     print(f"Model: {model_name}")
     print(f"Events: {n_events:,}, Entities: {n_entities}")
     print(f"LoRA: rank={lora_rank}, epochs={lora_epochs}, lr={lora_lr}")
     print(f"JEPA: steps={jepa_steps}, batch={jepa_batch_size}, lr={jepa_lr}")
-    print(f"Lookahead: K={lookahead_steps}, decay={lookahead_decay}")
+    print(f"Temporal: alpha={temporal_alpha}, coherence_w={temporal_coherence_weight}")
+    print(f"Lookahead: K={lookahead_steps}, decay={lookahead_decay}, ctx_len={context_length}")
+
+    # ------------------------------------------------------------------
+    # Inlined components (avoid package install in Modal image)
+    # ------------------------------------------------------------------
+
+    # --- WeakSIGReg (from regularizers.py) ---
+    class WeakSIGReg:
+        """Sketched covariance matching: ||sketch(Cov(Z)) - sketch(I)||_F^2"""
+        def __init__(self, sketch_dim: int = 64):
+            self.sketch_dim = sketch_dim
+            self._S = None
+            self._d = None
+
+        def compute_loss(self, embeddings: torch.Tensor) -> torch.Tensor:
+            n, d = embeddings.shape
+            if self._S is None or self._d != d:
+                self._S = torch.randn(self.sketch_dim, d, device=embeddings.device) / math.sqrt(d)
+                self._d = d
+            S = self._S.to(embeddings.device)
+            z = embeddings - embeddings.mean(dim=0, keepdim=True)
+            z_s = z @ S.t()                          # (N, K)
+            cov_s = (z_s.t() @ z_s) / float(n)       # (K, K)
+            target = S @ S.t()                        # (K, K)
+            return torch.norm(cov_s - target, p="fro") ** 2
+
+    # --- TransformerPredictor (from predictors.py) ---
+    class TransformerPredictor(nn.Module):
+        """Lightweight transformer: context window → multi-step prediction."""
+        def __init__(self, emb_dim, ctx_len, num_heads=4, num_layers=2, num_steps=1):
+            super().__init__()
+            self.emb_dim = emb_dim
+            self.ctx_len = ctx_len
+            self.num_steps = num_steps
+            self.pos_embedding = nn.Embedding(ctx_len, emb_dim)
+            enc_layer = nn.TransformerEncoderLayer(
+                d_model=emb_dim, nhead=num_heads,
+                dim_feedforward=emb_dim * 4, activation="gelu", batch_first=True,
+            )
+            self.transformer = nn.TransformerEncoder(enc_layer, num_layers=num_layers)
+            self.head = nn.Linear(emb_dim, num_steps * emb_dim)
+
+        def forward(self, context):
+            """context: (B, S, D) → (B, num_steps, D)"""
+            B, S, _ = context.shape
+            pos = torch.arange(S, device=context.device)
+            x = context + self.pos_embedding(pos).unsqueeze(0)
+            x = self.transformer(x)
+            out = self.head(x[:, -1, :])  # last token
+            return out.reshape(B, self.num_steps, self.emb_dim)
+
+    # --- Temporal aggregation (torch, differentiable) ---
+    def temporal_aggregate(
+        hidden: torch.Tensor,       # (N, H)
+        timestamps: torch.Tensor,   # (N,)
+        entity_types: torch.Tensor, # (N,) int-coded
+        primary_type: int,
+        alpha: float = 1.0,
+    ) -> torch.Tensor:
+        """Exponential-decay weighted average with relational weighting.
+
+        Recent events weighted higher. Primary entity events weighted 1.0,
+        related entity events weighted 0.5.
+        """
+        t_max = timestamps.max()
+        dt = t_max - timestamps
+        # Normalize to [0, 1] to prevent exp overflow
+        dt_max = dt.max()
+        if dt_max > 0:
+            dt_norm = dt / dt_max
+        else:
+            dt_norm = dt
+        time_w = torch.exp(-alpha * dt_norm)
+        rel_w = torch.where(entity_types == primary_type, 1.0, 0.5)
+        w = time_w * rel_w
+        w = w / w.sum().clamp(min=1e-8)
+        return (w.unsqueeze(1) * hidden).sum(dim=0)
+
+    # ------------------------------------------------------------------
+    # Integer-code entity types
+    # ------------------------------------------------------------------
+    etype_vocab: dict[str, int] = {}
+    etype_counter = 0
+    flat_etype_ids: list[int] = []
+    for et in flat_entity_types:
+        if et not in etype_vocab:
+            etype_vocab[et] = etype_counter
+            etype_counter += 1
+        flat_etype_ids.append(etype_vocab[et])
+
+    # Build reverse map: entity_id → primary entity type int
+    primary_etype_ints: dict[str, int] = {}
+    for eid, etype_str in primary_entity_types.items():
+        if etype_str not in etype_vocab:
+            etype_vocab[etype_str] = etype_counter
+            etype_counter += 1
+        primary_etype_ints[eid] = etype_vocab[etype_str]
+
+    # Build event→entity mapping for temporal coherence loss
+    event_to_entity: list[int] = [0] * n_events
+    entity_int_map: dict[str, int] = {}
+    ent_counter = 0
+    for eid, (start, end) in entity_ranges.items():
+        if eid not in entity_int_map:
+            entity_int_map[eid] = ent_counter
+            ent_counter += 1
+        ent_int = entity_int_map[eid]
+        for idx in range(start, end):
+            event_to_entity[idx] = ent_int
 
     # ================================================================
-    # Phase A: LoRA fine-tune (causal LM on domain text)
+    # Phase A: LoRA fine-tune (CLM + temporal coherence)
     # ================================================================
-    print(f"\n[Phase A] LoRA fine-tuning on domain text...")
+    print(f"\n[Phase A] LoRA fine-tuning (CLM + temporal coherence)...")
     t0 = time.time()
 
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -547,22 +666,15 @@ def train_lora_jepa(
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    # Load full causal LM for LoRA fine-tuning
     base_model = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        torch_dtype=torch.bfloat16,
-        trust_remote_code=True,
-        attn_implementation="sdpa",
+        model_name, torch_dtype=torch.bfloat16,
+        trust_remote_code=True, attn_implementation="sdpa",
     ).to(device)
 
-    # Apply LoRA
     lora_config = LoraConfig(
-        r=lora_rank,
-        lora_alpha=lora_alpha,
+        r=lora_rank, lora_alpha=lora_alpha,
         target_modules=["q_proj", "v_proj", "k_proj", "o_proj"],
-        lora_dropout=0.05,
-        bias="none",
-        task_type="CAUSAL_LM",
+        lora_dropout=0.05, bias="none", task_type="CAUSAL_LM",
     )
     lora_model = get_peft_model(base_model, lora_config)
     lora_trainable = sum(p.numel() for p in lora_model.parameters() if p.requires_grad)
@@ -570,21 +682,23 @@ def train_lora_jepa(
     print(f"  LoRA params: {lora_trainable:,} / {lora_total:,} "
           f"({lora_trainable * 100 / lora_total:.2f}%)")
 
-    # LoRA training: causal LM loss on domain text
     lora_optimizer = torch.optim.AdamW(
         [p for p in lora_model.parameters() if p.requires_grad],
-        lr=lora_lr,
-        weight_decay=0.01,
+        lr=lora_lr, weight_decay=0.01,
     )
+
+    ts_tensor_cpu = torch.tensor(flat_ts, dtype=torch.float32)
+    ent_tensor_cpu = torch.tensor(event_to_entity, dtype=torch.long)
 
     lora_model.train()
     lora_losses = []
+    tc_losses = []
 
-    # Shuffle and batch texts
     indices = list(range(n_events))
     for epoch in range(lora_epochs):
         random.shuffle(indices)
         epoch_loss = 0.0
+        epoch_tc = 0.0
         n_batches = 0
 
         for i in range(0, n_events, lora_batch_size):
@@ -592,14 +706,10 @@ def train_lora_jepa(
             batch_texts = [flat_texts[j] for j in batch_idx]
 
             tokens = tokenizer(
-                batch_texts,
-                return_tensors="pt",
-                padding=True,
-                truncation=True,
-                max_length=max_length,
+                batch_texts, return_tensors="pt",
+                padding=True, truncation=True, max_length=max_length,
             ).to(device)
 
-            # Causal LM loss: predict next token
             labels = tokens["input_ids"].clone()
             labels[tokens["attention_mask"] == 0] = -100
 
@@ -608,24 +718,61 @@ def train_lora_jepa(
                     input_ids=tokens["input_ids"],
                     attention_mask=tokens["attention_mask"],
                     labels=labels,
+                    output_hidden_states=True,
                 )
-                loss = outputs.loss
+                clm_loss = outputs.loss
+
+            # --- Temporal coherence auxiliary loss ---
+            tc_loss = torch.tensor(0.0, device=device)
+            if temporal_coherence_weight > 0 and len(batch_idx) > 1:
+                # Mean-pool hidden states per event in this batch
+                hidden = outputs.hidden_states[-1]  # (B, T, H)
+                mask = tokens["attention_mask"].unsqueeze(-1).to(hidden.dtype)
+                h_pooled = (hidden * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1e-8)
+                h_pooled = h_pooled.float()  # (B, H)
+
+                # Normalize for cosine sim
+                h_norm = F.normalize(h_pooled, dim=-1)
+                cos_sim = h_norm @ h_norm.t()  # (B, B)
+
+                # Temporal distances between events in batch
+                batch_ts = ts_tensor_cpu[batch_idx].to(device)
+                tdist = (batch_ts.unsqueeze(0) - batch_ts.unsqueeze(1)).abs()
+                tdist_norm = tdist / tdist.max().clamp(min=1.0)
+
+                # Same-entity mask
+                batch_ents = ent_tensor_cpu[batch_idx].to(device)
+                same_ent = (batch_ents.unsqueeze(0) == batch_ents.unsqueeze(1)).float()
+                # Exclude diagonal
+                diag_mask = 1.0 - torch.eye(len(batch_idx), device=device)
+                pair_mask = same_ent * diag_mask
+
+                if pair_mask.sum() > 0:
+                    # Adjacent events should be more similar
+                    temporal_target = torch.exp(-2.0 * tdist_norm)
+                    tc_loss = -((cos_sim * temporal_target * pair_mask).sum()
+                                / pair_mask.sum().clamp(min=1.0))
+
+            loss = clm_loss + temporal_coherence_weight * tc_loss
 
             lora_optimizer.zero_grad(set_to_none=True)
             loss.backward()
             nn.utils.clip_grad_norm_(lora_model.parameters(), 1.0)
             lora_optimizer.step()
 
-            epoch_loss += loss.item()
+            epoch_loss += clm_loss.item()
+            epoch_tc += tc_loss.item()
             n_batches += 1
-            lora_losses.append(loss.item())
+            lora_losses.append(clm_loss.item())
+            tc_losses.append(tc_loss.item())
 
             if n_batches % 100 == 0:
-                print(f"  Epoch {epoch + 1}/{lora_epochs}, "
-                      f"batch {n_batches}: loss={epoch_loss / n_batches:.4f}")
+                print(f"  Epoch {epoch + 1}/{lora_epochs}, batch {n_batches}: "
+                      f"clm={epoch_loss / n_batches:.4f} tc={epoch_tc / n_batches:.4f}")
 
         if n_batches > 0:
-            print(f"  Epoch {epoch + 1} done: avg_loss={epoch_loss / n_batches:.4f}")
+            print(f"  Epoch {epoch + 1} done: clm={epoch_loss / n_batches:.4f} "
+                  f"tc={epoch_tc / n_batches:.4f}")
 
     lora_time = time.time() - t0
     print(f"  LoRA fine-tuning done in {lora_time:.1f}s")
@@ -636,10 +783,7 @@ def train_lora_jepa(
     print(f"\n[Phase B] Extracting hidden states from LoRA-adapted model...")
     t1 = time.time()
 
-    # Switch to base model mode for extraction (keep LoRA weights)
     lora_model.eval()
-
-    # Get hidden dim from text config
     hidden_dim = _get_hidden_dim(base_model.config)
     print(f"  hidden_dim={hidden_dim}")
 
@@ -649,11 +793,8 @@ def train_lora_jepa(
     for i in range(0, n_events, extract_bs):
         batch = flat_texts[i : i + extract_bs]
         tokens = tokenizer(
-            batch,
-            return_tensors="pt",
-            padding=True,
-            truncation=True,
-            max_length=max_length,
+            batch, return_tensors="pt",
+            padding=True, truncation=True, max_length=max_length,
         ).to(device)
 
         with torch.no_grad(), torch.amp.autocast("cuda", dtype=torch.bfloat16):
@@ -663,7 +804,6 @@ def train_lora_jepa(
                 output_hidden_states=True,
             )
 
-        # Get last hidden state (before lm_head)
         hidden = outputs.hidden_states[-1]
         mask = tokens["attention_mask"].unsqueeze(-1).to(hidden.dtype)
         pooled = (hidden * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1e-8)
@@ -677,14 +817,18 @@ def train_lora_jepa(
     extract_time = time.time() - t1
     print(f"  Done: {all_hidden.shape} in {extract_time:.1f}s")
 
+    # Move timestamp and entity type tensors to GPU
+    ts_gpu = torch.tensor(flat_ts, dtype=torch.float32, device=device)
+    etype_gpu = torch.tensor(flat_etype_ids, dtype=torch.long, device=device)
+
     # Free LoRA model
     del lora_model, base_model, all_hidden_list
     torch.cuda.empty_cache()
 
     # ================================================================
-    # Phase C: JEPA + multi-step lookahead
+    # Phase C: JEPA + TransformerPredictor + WeakSIGReg
     # ================================================================
-    print(f"\n[Phase C] Training projection + predictor with lookahead...")
+    print(f"\n[Phase C] Training projection + TransformerPredictor...")
 
     # Projection: H → D
     mid = max(embedding_dim * 4, hidden_dim // 4)
@@ -700,38 +844,32 @@ def train_lora_jepa(
     for p in ema_proj.parameters():
         p.requires_grad = False
 
-    # Predictor: context_emb → predicted_target_emb
-    predictor = nn.Sequential(
-        nn.Linear(embedding_dim, 256),
-        nn.GELU(),
-        nn.LayerNorm(256),
-        nn.Linear(256, embedding_dim),
+    # TransformerPredictor: context window → multi-step prediction
+    predictor = TransformerPredictor(
+        emb_dim=embedding_dim,
+        ctx_len=context_length,
+        num_heads=4,
+        num_layers=2,
+        num_steps=lookahead_steps,
     ).to(device)
 
-    # Lookahead predictor: (embedding, step_encoding) → predicted_future_emb
-    # Takes embedding + step number as input
-    lookahead_predictor = nn.Sequential(
-        nn.Linear(embedding_dim + 1, 256),  # +1 for step encoding
-        nn.GELU(),
-        nn.LayerNorm(256),
-        nn.Linear(256, embedding_dim),
-    ).to(device)
+    # WeakSIGReg regularizer
+    weak_sigreg = WeakSIGReg(sketch_dim=min(64, embedding_dim))
 
     trainable = [
-        p for p in (
-            list(projection.parameters()) +
-            list(predictor.parameters()) +
-            list(lookahead_predictor.parameters())
-        ) if p.requires_grad
+        p for p in (list(projection.parameters()) + list(predictor.parameters()))
+        if p.requires_grad
     ]
     n_params = sum(p.numel() for p in trainable)
     optimizer = torch.optim.AdamW(trainable, lr=jepa_lr, weight_decay=0.01)
     print(f"  Trainable params: {n_params:,}")
+    print(f"  TransformerPredictor: {sum(p.numel() for p in predictor.parameters()):,}")
 
     # Ranges
     ranges = {k: tuple(v) for k, v in entity_ranges.items()}
+    eid_list = list(ranges.keys())
 
-    # Smooth curriculum
+    # Smooth curriculum + LR schedule
     warmup = min(200, jepa_steps // 10)
     cooldown = min(400, jepa_steps // 5)
     primary = jepa_steps - cooldown
@@ -765,13 +903,14 @@ def train_lora_jepa(
             ctx_idx = list(range(start, start + split))
             tgt_idx = list(range(start + split, start + te))
             if tgt_idx:
-                s.append((ctx_idx, tgt_idx))
+                s.append((eid, ctx_idx, tgt_idx))
         random.shuffle(s)
         return s
 
     losses_log: list[float] = []
     jepa_losses_log: list[float] = []
-    lookahead_losses_log: list[float] = []
+    la_losses_log: list[float] = []
+    reg_losses_log: list[float] = []
     running_loss = 0.0
     t_train = time.time()
     rebuild_every = max(50, n_entities * 2)
@@ -793,70 +932,89 @@ def train_lora_jepa(
         batch_s = samples[si : si + jepa_batch_size]
         si += jepa_batch_size
 
-        # LR
+        # LR schedule
         m = lr_mult(step)
         for pg in optimizer.param_groups:
             pg["lr"] = jepa_lr * m
 
-        # --- JEPA loss: context → predict target ---
-        ctx_pooled = []
-        tgt_pooled = []
-        for ctx_idx, tgt_idx in batch_s:
-            ctx_pooled.append(all_hidden[ctx_idx].mean(dim=0))
-            tgt_pooled.append(all_hidden[tgt_idx].mean(dim=0))
+        # --- Temporal aggregation (replaces mean pooling) ---
+        ctx_agg = []
+        tgt_agg = []
+        ctx_seqs = []  # per-event projected embeddings for TransformerPredictor
 
-        ctx_h = torch.stack(ctx_pooled)
-        tgt_h = torch.stack(tgt_pooled)
+        for eid, ctx_idx, tgt_idx in batch_s:
+            ptype = primary_etype_ints.get(eid, 0)
 
-        ctx_emb = projection(ctx_h)
+            # Context: exponential-decay weighted aggregate
+            ctx_h = temporal_aggregate(
+                all_hidden[ctx_idx], ts_gpu[ctx_idx],
+                etype_gpu[ctx_idx], ptype, temporal_alpha
+            )
+            ctx_agg.append(ctx_h)
+
+            # Target: exponential-decay weighted aggregate (EMA encoder)
+            tgt_h = temporal_aggregate(
+                all_hidden[tgt_idx], ts_gpu[tgt_idx],
+                etype_gpu[tgt_idx], ptype, temporal_alpha
+            )
+            tgt_agg.append(tgt_h)
+
+            # Keep per-event projected context for TransformerPredictor
+            # Take last `context_length` events
+            cl = min(len(ctx_idx), context_length)
+            ctx_seqs.append(all_hidden[ctx_idx[-cl:]])  # (cl, H)
+
+        ctx_h_batch = torch.stack(ctx_agg)  # (B, H)
+        tgt_h_batch = torch.stack(tgt_agg)  # (B, H)
+
+        # Project to embedding space
+        ctx_emb = projection(ctx_h_batch)  # (B, D)
         with torch.no_grad():
-            tgt_emb = ema_proj(tgt_h)
+            tgt_emb = ema_proj(tgt_h_batch)  # (B, D)
 
-        pred_emb = predictor(ctx_emb)
-        jepa_loss = nn.functional.smooth_l1_loss(pred_emb, tgt_emb)
+        # --- JEPA loss: predict target from context (via transformer) ---
+        # Build padded context sequences for TransformerPredictor
+        B = len(batch_s)
+        ctx_seq_padded = torch.zeros(B, context_length, embedding_dim, device=device)
+        for i, seq_h in enumerate(ctx_seqs):
+            seq_emb = projection(seq_h)  # (cl, D)
+            cl = seq_emb.shape[0]
+            ctx_seq_padded[i, context_length - cl:, :] = seq_emb  # right-aligned
 
-        # --- Lookahead loss: predict t+1, t+2, ..., t+K ---
+        # TransformerPredictor: (B, ctx_len, D) → (B, K, D)
+        pred_multi = predictor(ctx_seq_padded)
+
+        # JEPA loss: first prediction step vs aggregate target
+        pred_emb = pred_multi[:, 0, :]  # (B, D)
+        jepa_loss = F.smooth_l1_loss(pred_emb, tgt_emb)
+
+        # --- Lookahead loss: steps 1..K with decay ---
         la_loss = torch.tensor(0.0, device=device)
         la_count = 0
 
-        for ctx_idx, tgt_idx in batch_s:
+        for b_idx, (eid, ctx_idx, tgt_idx) in enumerate(batch_s):
             n_future = len(tgt_idx)
-            if n_future < 2:
-                continue
-
-            # Context embedding for this sample
-            ctx_e = projection(all_hidden[ctx_idx].mean(dim=0).unsqueeze(0))  # (1, D)
+            ptype = primary_etype_ints.get(eid, 0)
 
             for k in range(min(n_future, lookahead_steps)):
-                # Target at step k
                 with torch.no_grad():
                     tgt_k = ema_proj(all_hidden[tgt_idx[k]].unsqueeze(0))  # (1, D)
-
-                # Predict step k: concat context with normalized step number
-                step_enc = torch.tensor([[k / lookahead_steps]], device=device)
-                la_input = torch.cat([ctx_e, step_enc], dim=-1)  # (1, D+1)
-                pred_k = lookahead_predictor(la_input)  # (1, D)
-
+                pred_k = pred_multi[b_idx, k, :].unsqueeze(0)  # (1, D)
                 weight = lookahead_decay ** k
-                la_loss = la_loss + weight * nn.functional.smooth_l1_loss(pred_k, tgt_k)
+                la_loss = la_loss + weight * F.smooth_l1_loss(pred_k, tgt_k)
                 la_count += 1
 
         if la_count > 0:
             la_loss = la_loss / la_count
 
-        # --- Regularization ---
-        B = ctx_emb.shape[0]
+        # --- WeakSIGReg regularization (normalized by dim^2 to prevent divergence) ---
         reg_loss = torch.tensor(0.0, device=device)
         if B > 1:
-            centered = ctx_emb - ctx_emb.mean(dim=0, keepdim=True)
-            cov = (centered.T @ centered) / (B - 1)
-            off_diag = cov - torch.diag(cov.diag())
-            cov_loss = off_diag.pow(2).sum() / (cov.shape[0] ** 2)
-            var_loss = torch.relu(1.0 - ctx_emb.std(dim=0)).mean()
-
             progress = step / max(jepa_steps - 1, 1)
-            reg_w = 0.01 + 0.09 * progress
-            reg_loss = reg_w * (cov_loss + var_loss)
+            reg_w = 0.01 + 0.04 * progress  # ramp 0.01 → 0.05
+            raw_reg = weak_sigreg.compute_loss(ctx_emb)
+            # Normalize: Frobenius norm grows with dim^2, keep loss O(1)
+            reg_loss = reg_w * raw_reg / (embedding_dim ** 2)
 
         # --- Total loss ---
         loss = jepa_loss + 0.5 * la_loss + reg_loss
@@ -866,7 +1024,7 @@ def train_lora_jepa(
         nn.utils.clip_grad_norm_(trainable, 1.0)
         optimizer.step()
 
-        # EMA update
+        # EMA update (tau ramps 0.99 → 0.999)
         progress = step / max(jepa_steps - 1, 1)
         tau = 0.99 + 0.009 * progress
         with torch.no_grad():
@@ -877,15 +1035,16 @@ def train_lora_jepa(
         running_loss = 0.95 * running_loss + 0.05 * lv if step > 0 else lv
         losses_log.append(lv)
         jepa_losses_log.append(jepa_loss.item())
-        lookahead_losses_log.append(la_loss.item() if la_count > 0 else 0.0)
+        la_losses_log.append(la_loss.item() if la_count > 0 else 0.0)
+        reg_losses_log.append(reg_loss.item())
 
         if (step + 1) % 100 == 0:
             lr = optimizer.param_groups[0]["lr"]
             print(
                 f"  step {step + 1:5d}/{jepa_steps} | "
                 f"total={running_loss:.4f} jepa={jepa_losses_log[-1]:.4f} "
-                f"la={lookahead_losses_log[-1]:.4f} | lr={lr:.2e} | "
-                f"ctx=[{ctx_min:.2f},{ctx_max:.2f}] K={pred_steps}"
+                f"la={la_losses_log[-1]:.4f} reg={reg_losses_log[-1]:.4f} | "
+                f"lr={lr:.2e} | ctx=[{ctx_min:.2f},{ctx_max:.2f}] K={pred_steps}"
             )
 
     train_time = time.time() - t_train
@@ -894,32 +1053,136 @@ def train_lora_jepa(
     print(f"Total pipeline: {total_time:.1f}s")
 
     # ================================================================
-    # Encode all entities
+    # Phase D: Evaluate embedding quality
     # ================================================================
-    print(f"\nEncoding {n_entities} entities...")
-    entity_embeddings = {}
+    print(f"\n[Phase D] Evaluating embedding quality...")
+
     projection.eval()
+    entity_embeddings: dict[str, list[float]] = {}
+    entity_emb_list: list[torch.Tensor] = []
+    entity_ids_ordered: list[str] = []
+    entity_type_ordered: list[str] = []
+
     with torch.no_grad():
         for eid, (start, end) in ranges.items():
-            h = all_hidden[start:end].mean(dim=0, keepdim=True)
-            emb = projection(h).cpu().squeeze(0).tolist()
-            entity_embeddings[eid] = emb
+            ptype = primary_etype_ints.get(eid, 0)
+            h = temporal_aggregate(
+                all_hidden[start:end], ts_gpu[start:end],
+                etype_gpu[start:end], ptype, temporal_alpha
+            )
+            emb = projection(h.unsqueeze(0)).squeeze(0)  # (D,)
+            entity_embeddings[eid] = emb.cpu().tolist()
+            entity_emb_list.append(emb)
+            entity_ids_ordered.append(eid)
+            entity_type_ordered.append(primary_entity_types.get(eid, "UNKNOWN"))
+
+    emb_matrix = torch.stack(entity_emb_list)  # (E, D)
+    E = emb_matrix.shape[0]
+
+    # Metric 1: Temporal coherence (Spearman-like)
+    tc_scores = []
+    with torch.no_grad():
+        sample_eids = random.sample(eid_list, min(20, len(eid_list)))
+        for eid in sample_eids:
+            start, end = ranges[eid]
+            if end - start < 5:
+                continue
+            ptype = primary_etype_ints.get(eid, 0)
+            evt_embs = projection(all_hidden[start:end])  # (N, D)
+            evt_ts = ts_gpu[start:end]
+            e_norm = F.normalize(evt_embs, dim=-1)
+            cos_mat = e_norm @ e_norm.t()
+            t_dist = (evt_ts.unsqueeze(0) - evt_ts.unsqueeze(1)).abs()
+            t_prox = 1.0 / (1.0 + t_dist / t_dist.max().clamp(min=1.0))
+            # Mask diagonal
+            mask = 1.0 - torch.eye(end - start, device=device)
+            n_pairs = mask.sum()
+            if n_pairs > 0:
+                corr = ((cos_mat * mask).sum() * (t_prox * mask).sum() -
+                        n_pairs * (cos_mat * t_prox * mask).sum())
+                # Simplified: just measure avg cos_sim × temporal_proximity
+                tc_scores.append(((cos_mat * t_prox * mask).sum() / n_pairs).item())
+    temporal_coherence = sum(tc_scores) / len(tc_scores) if tc_scores else 0.0
+
+    # Metric 2: Cross-entity discrimination
+    emb_norm = F.normalize(emb_matrix, dim=-1)
+    full_sim = emb_norm @ emb_norm.t()  # (E, E)
+
+    # Group by entity type
+    type_to_indices: dict[str, list[int]] = {}
+    for i, et in enumerate(entity_type_ordered):
+        type_to_indices.setdefault(et, []).append(i)
+
+    intra_sims = []
+    inter_sims = []
+    for et, idxs in type_to_indices.items():
+        if len(idxs) < 2:
+            continue
+        for i in range(len(idxs)):
+            for j in range(i + 1, len(idxs)):
+                intra_sims.append(full_sim[idxs[i], idxs[j]].item())
+        others = [k for k in range(E) if k not in idxs]
+        for i in idxs[:5]:  # sample
+            for j in others[:10]:
+                inter_sims.append(full_sim[i, j].item())
+
+    avg_intra = sum(intra_sims) / len(intra_sims) if intra_sims else 0.0
+    avg_inter = sum(inter_sims) / len(inter_sims) if inter_sims else 0.0
+    discrimination = avg_intra / max(avg_inter, 1e-8) if avg_inter != 0 else float('inf')
+
+    # Metric 3: Nearest-neighbor quality
+    nn_same_type = 0
+    nn_total = 0
+    k_nn = min(5, E - 1)
+    if k_nn > 0:
+        for i in range(E):
+            sims = full_sim[i].clone()
+            sims[i] = -1.0  # exclude self
+            _, top_k = sims.topk(k_nn)
+            for j in top_k:
+                if entity_type_ordered[j.item()] == entity_type_ordered[i]:
+                    nn_same_type += 1
+                nn_total += 1
+    nn_quality = nn_same_type / max(nn_total, 1)
+
+    # Metric 4: Isotropy (per-dimension variance uniformity)
+    per_dim_var = emb_matrix.var(dim=0)
+    isotropy = (per_dim_var.min() / per_dim_var.max()).item() if per_dim_var.max() > 0 else 0.0
+
+    metrics = {
+        "temporal_coherence": temporal_coherence,
+        "discrimination_ratio": discrimination,
+        "avg_intra_sim": avg_intra,
+        "avg_inter_sim": avg_inter,
+        "nn_same_type_fraction": nn_quality,
+        "isotropy": isotropy,
+        "n_entity_types": len(type_to_indices),
+    }
+
+    print(f"  Temporal coherence:  {temporal_coherence:.4f}")
+    print(f"  Discrimination:      {discrimination:.4f} (intra={avg_intra:.4f} / inter={avg_inter:.4f})")
+    print(f"  NN same-type:        {nn_quality:.4f} (k={k_nn})")
+    print(f"  Isotropy:            {isotropy:.4f}")
 
     # Save artifacts
     import json
     import os
 
-    artifact_dir = "/root/jepa-artifacts/latest-lora"
+    artifact_dir = "/root/jepa-artifacts/latest-v2"
     os.makedirs(artifact_dir, exist_ok=True)
     torch.save(projection.cpu().state_dict(), f"{artifact_dir}/projection.pt")
-    torch.save(lookahead_predictor.cpu().state_dict(), f"{artifact_dir}/lookahead.pt")
+    torch.save(predictor.cpu().state_dict(), f"{artifact_dir}/transformer_predictor.pt")
     with open(f"{artifact_dir}/config.json", "w") as f:
         json.dump({
             "hidden_dim": hidden_dim, "embedding_dim": embedding_dim,
             "lora_rank": lora_rank, "lookahead_steps": lookahead_steps,
+            "context_length": context_length, "temporal_alpha": temporal_alpha,
+            "version": "v2",
         }, f)
     with open(f"{artifact_dir}/embeddings.json", "w") as f:
         json.dump(entity_embeddings, f)
+    with open(f"{artifact_dir}/metrics.json", "w") as f:
+        json.dump(metrics, f)
     jepa_cache.commit()
     print(f"  Saved to {artifact_dir}")
 
@@ -927,9 +1190,10 @@ def train_lora_jepa(
         "total_steps": jepa_steps,
         "final_loss": losses_log[-1] if losses_log else None,
         "final_jepa_loss": jepa_losses_log[-1] if jepa_losses_log else None,
-        "final_lookahead_loss": lookahead_losses_log[-1] if lookahead_losses_log else None,
+        "final_lookahead_loss": la_losses_log[-1] if la_losses_log else None,
         "losses": losses_log,
         "lora_losses": lora_losses,
+        "tc_losses": tc_losses,
         "trainable_params": n_params,
         "lora_params": lora_trainable,
         "hidden_dim": hidden_dim,
@@ -937,6 +1201,7 @@ def train_lora_jepa(
         "n_entities": n_entities,
         "n_events": n_events,
         "entity_embeddings": entity_embeddings,
+        "metrics": metrics,
         "lora_time_s": lora_time,
         "extract_time_s": extract_time,
         "train_time_s": train_time,
@@ -988,32 +1253,39 @@ def main(
     )
     graph.close()
 
-    # Flatten for Modal
+    # Flatten for Modal (with entity types for temporal aggregation)
     flat_texts: list[str] = []
     flat_ts: list[float] = []
+    flat_entity_types: list[str] = []
     entity_ranges: dict[str, list[int]] = {}
+    primary_entity_types: dict[str, str] = {}
 
     for ctx in contexts:
         start = len(flat_texts)
         for e in ctx.events:
             flat_texts.append(e.text)
             flat_ts.append(e.epoch)
+            flat_entity_types.append(e.entity_type)
         entity_ranges[ctx.entity_id] = [start, len(flat_texts)]
+        primary_entity_types[ctx.entity_id] = ctx.entity_type
 
     n_events = len(flat_texts)
     elapsed = time.time() - t0
-    print(f"  {len(contexts)} entities, {n_events:,} events ({elapsed:.1f}s)")
+    n_types = len(set(flat_entity_types))
+    print(f"  {len(contexts)} entities, {n_events:,} events, {n_types} entity types ({elapsed:.1f}s)")
     print(f"  Avg {n_events / len(contexts):.0f} events/entity "
           f"(graph context from {sum(len(c.related_ids) for c in contexts) / len(contexts):.1f} "
           f"related types)")
 
     if action == "lora":
-        print(f"\nSending to GPU: LoRA + JEPA + lookahead "
+        print(f"\nSending to GPU: LoRA-JEPA v2 "
               f"({total_steps} steps, K={lookahead_steps})...")
         result = train_lora_jepa.remote(
             flat_texts=flat_texts,
             flat_ts=flat_ts,
+            flat_entity_types=flat_entity_types,
             entity_ranges=entity_ranges,
+            primary_entity_types=primary_entity_types,
             model_name=model_name,
             embedding_dim=64,
             lora_epochs=lora_epochs,
@@ -1023,7 +1295,7 @@ def main(
         )
 
         print(f"\n{'=' * 60}")
-        print(f"RESULTS — LoRA-JEPA + Lookahead")
+        print(f"RESULTS — LoRA-JEPA v2")
         print(f"{'=' * 60}")
         print(f"JEPA steps:     {result['total_steps']}")
         print(f"Final loss:     {result['final_loss']:.6f}")
@@ -1040,11 +1312,26 @@ def main(
         print(f"Entities:       {result['n_entities']}")
         print(f"Events:         {result['n_events']:,}")
 
+        # Metrics
+        metrics = result.get("metrics", {})
+        if metrics:
+            print(f"\n--- Embedding Quality Metrics ---")
+            print(f"  Temporal coherence:  {metrics.get('temporal_coherence', 0):.4f}")
+            print(f"  Discrimination:      {metrics.get('discrimination_ratio', 0):.4f} "
+                  f"(intra={metrics.get('avg_intra_sim', 0):.4f} / "
+                  f"inter={metrics.get('avg_inter_sim', 0):.4f})")
+            print(f"  NN same-type:        {metrics.get('nn_same_type_fraction', 0):.4f}")
+            print(f"  Isotropy:            {metrics.get('isotropy', 0):.4f}")
+
         # LoRA loss curve
         if result.get("lora_losses"):
             ll = result["lora_losses"]
-            print(f"\nLoRA loss ({len(ll)} batches): "
-                  f"{ll[0]:.4f} → {ll[-1]:.4f}")
+            print(f"\nLoRA CLM loss ({len(ll)} batches): {ll[0]:.4f} → {ll[-1]:.4f}")
+        if result.get("tc_losses"):
+            tc = result["tc_losses"]
+            tc_nonzero = [v for v in tc if v != 0]
+            if tc_nonzero:
+                print(f"Temporal coherence loss: {tc_nonzero[0]:.4f} → {tc_nonzero[-1]:.4f}")
 
         # JEPA loss curve
         losses = result["losses"]
