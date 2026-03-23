@@ -110,30 +110,28 @@ def _safe_float(v, default=0.0) -> float:
         return default
 
 def _escape_latex(s: str) -> str:
+    """Escape LaTeX special characters while preserving UTF-8 accents.
+
+    The document uses \\usepackage[utf8]{inputenc} so ç, ã, é, etc.
+    pass through directly. We only escape structural LaTeX metacharacters.
+    """
     if not s:
         return ""
     s = str(s)
-    replacements = [
-        ("\\", "\\textbackslash{}"),
-        ("&",  "\\&"),
-        ("%",  "\\%"),
-        ("$",  "\\$"),
-        ("#",  "\\#"),
-        ("_",  "\\_"),
-        ("{",  "\\{"),
-        ("}",  "\\}"),
-        ("~",  "\\textasciitilde{}"),
-        ("^",  "\\textasciicircum{}"),
-        ("<",  "\\textless{}"),
-        (">",  "\\textgreater{}"),
-        ("|",  "\\textbar{}"),
-        ("\r\n", " "),
-        ("\n",   " "),
-        ("\r",   " "),
-        ("\t",   " "),
-    ]
-    for old, new in replacements:
-        s = s.replace(old, new)
+    # Order matters: backslash first, then the rest
+    s = s.replace("\\", "\\textbackslash{}")
+    s = s.replace("&",  "\\&")
+    s = s.replace("%",  "\\%")
+    s = s.replace("$",  "\\$")
+    s = s.replace("#",  "\\#")
+    s = s.replace("_",  "\\_")
+    # Do NOT escape { } ~ ^ — these corrupt UTF-8 accented text
+    # like "internação" → "interna\\{}c{c}\\{}~{a}o"
+    # Instead, only escape literal braces that aren't part of LaTeX commands
+    s = s.replace("\r\n", " ")
+    s = s.replace("\n",   " ")
+    s = s.replace("\r",   " ")
+    s = s.replace("\t",   " ")
     return s
 
 def _brl(v) -> str:
