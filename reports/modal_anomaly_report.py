@@ -1554,7 +1554,8 @@ Maior z: \textbf{""" + f"{max_z:.2f}" + r"""} \\
                 r"}" + "\n"
             )
 
-            L.append(r"\end{anomalycard}" + "\n\n")
+            L.append(r"\end{anomalycard}" + "\n")
+            L.append(r"\newpage" + "\n")
 
         L.append(r"\clearpage")
 
