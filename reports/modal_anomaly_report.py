@@ -950,19 +950,19 @@ def _build_justification(a: dict, similar_map: dict, similar_details: dict,
     if avg_bill > 0 and vl_total > 0:
         mult = vl_total / avg_bill
         summary_parts.append(
-            f"faturamento de {_brl_plain(vl_total)} ({mult:.1f}x a m\\'{{}}'edia de "
+            f"faturamento de {_brl_plain(vl_total)} ({mult:.1f}x a média de "
             f"{_brl_plain(avg_bill)} do hospital)"
         )
     elif vl_total > 0:
         summary_parts.append(f"faturamento de {_brl_plain(vl_total)}")
 
     if avg_proc > 0 and n_proc > 0:
-        summary_parts.append(f"{n_proc} procedimentos (m\\'{{}}'edia do hospital: {avg_proc:.0f})")
+        summary_parts.append(f"{n_proc} procedimentos (média do hospital: {avg_proc:.0f})")
     elif n_proc > 0:
         summary_parts.append(f"{n_proc} procedimentos")
 
     if avg_los > 0 and los > 0:
-        summary_parts.append(f"LOS de {los} dias (m\\'{{}}'edia: {avg_los:.1f}d)")
+        summary_parts.append(f"LOS de {los} dias (média: {avg_los:.1f}d)")
     elif los > 0:
         summary_parts.append(f"LOS de {los} dias")
 
@@ -971,14 +971,14 @@ def _build_justification(a: dict, similar_map: dict, similar_details: dict,
         avg_glosa_rate = (avg_glosa / avg_bill * 100) if avg_bill > 0 else 0
         summary_parts.append(
             f"taxa de glosa de {glosa_rate:.0f}\\% "
-            f"(m\\'{{}}'edia: {avg_glosa_rate:.0f}\\%)"
+            f"(média: {avg_glosa_rate:.0f}\\%)"
         )
     elif vl_glosa > 0:
         glosa_rate = (vl_glosa / vl_total * 100) if vl_total > 0 else 0
         summary_parts.append(f"taxa de glosa de {glosa_rate:.0f}\\%")
 
     if n_evo > 0:
-        summary_parts.append(f"{n_evo} evolu\\c{{c}}\\~{{o}}es cl\\'{{}}'nicas")
+        summary_parts.append(f"{n_evo} evolu\\c{{c}}\\~{{o}}es clínicas")
 
     if readmit:
         summary_parts.append("readmiss\\~{{a}}o em menos de 30 dias")
@@ -987,6 +987,25 @@ def _build_justification(a: dict, similar_map: dict, similar_details: dict,
     dim_info = dim_analysis.get((src, iid), [])
     top2_dims = dim_info[:2] if dim_info else []
 
+    # Build specific recommendation based on actual data deviations
+    recs = []
+    if avg_bill > 0 and vl_total > 0 and vl_total / avg_bill > 2.0:
+        recs.append(f"Verificar justificativa para faturamento {vl_total/avg_bill:.1f}x acima da média do hospital")
+    if avg_proc > 0 and n_proc > 0 and n_proc / avg_proc > 2.0:
+        recs.append(f"Auditar os {n_proc} procedimentos realizados (média do hospital: {avg_proc:.0f})")
+    if vl_total > 0 and vl_glosa > 0 and (vl_glosa / vl_total) > 0.10:
+        recs.append(f"Investigar taxa de glosa de {vl_glosa/vl_total*100:.0f}\\% — acima do aceitável")
+    if avg_los > 0 and los > 0 and los / avg_los > 2.0:
+        recs.append(f"Avaliar permanência de {los} dias (média: {avg_los:.0f}d) — possível ineficiência ou complicação")
+    if readmit:
+        recs.append("Investigar causa da readmissão em menos de 30 dias — possível alta prematura")
+    if n_evo == 0 and los > 3:
+        recs.append(f"Internação de {los} dias sem registros de evolução clínica — possível falha de documentação")
+    if n_proc == 0 and vl_total > 0:
+        recs.append("Faturamento sem procedimentos registrados — possível inconsistência no registro")
+    if not recs:
+        recs.append(f"Internação apresenta z-score={z:.2f}, indicando perfil atípico para o hospital")
+
     if summary_parts:
         joined = "; ".join(summary_parts) + "."
         L.append(
@@ -994,46 +1013,37 @@ def _build_justification(a: dict, similar_map: dict, similar_details: dict,
             r"title={\textbf{Justificativa da Anomalia}},fonttitle=\bfseries\small,"
             r"left=4pt,right=4pt,top=3pt,bottom=3pt]"
         )
-        L.append(r"{\small " + _escape_latex(
-            f"Esta interna\\c{{c}}\\~{{a}}o apresenta: {joined}"
-        ) + r"}")
-        if top2_dims:
-            dim_str = " e ".join(
-                f"dim[{d}] ({m})" for d, _dz, m in top2_dims[:2]
-            )
-            L.append(
-                r"\\\textbf{Maior desvio nas dimens\~{o}es:} {\small " +
-                _escape_latex(dim_str) + r"}"
-            )
+        L.append(r"{\small Esta internação apresenta: " + _escape_latex(joined) + r"}")
         if readmit:
             L.append(
                 r"\\\textcolor{anomred}{\textbf{Alerta:} Paciente readmitido em menos de 30 dias.}"
             )
-        L.append(r"\\\textbf{Recomenda\c{c}\~{a}o:} "
-                 r"{\small Recomenda-se auditoria detalhada dos itens faturados e "
-                 r"procedimentos realizados.}")
+        # Specific recommendations (not generic boilerplate)
+        L.append(r"\\\textbf{Recomendações específicas:}")
+        L.append(r"\begin{itemize}[nosep,leftmargin=12pt]")
+        for rec in recs:
+            L.append(r"\item {\small " + _escape_latex(rec) + r"}")
+        L.append(r"\end{itemize}")
         L.append(r"\end{tcolorbox}")
     else:
         L.append(
             r"\vspace{2pt}\begin{tcolorbox}[colback=yellow!5,colframe=anomorange,"
             r"title={\textbf{Justificativa da Anomalia}}]"
         )
-        L.append(
-            r"{\small Interna\c{c}\~{a}o apresenta z-score elevado (z=" +
-            f"{z:.2f}" +
-            r") indicando desvio significativo do padr\~{a}o do hospital. "
-            r"Dados financeiros n\~{a}o dispon\'{i}veis para compara\c{c}\~{a}o detalhada.}"
-        )
+        L.append(r"\begin{itemize}[nosep,leftmargin=12pt]")
+        for rec in recs:
+            L.append(r"\item {\small " + _escape_latex(rec) + r"}")
+        L.append(r"\end{itemize}")
         L.append(r"\end{tcolorbox}")
 
     # ── Baseline comparison table ──
     if avg_bill > 0 or avg_los > 0:
-        L.append(r"\vspace{4pt}{\footnotesize\textbf{Compara\c{c}\~{a}o com Baseline do Hospital:}}")
+        L.append(r"\vspace{4pt}{\footnotesize\textbf{Comparação com Baseline do Hospital:}}")
         L.append(
             r"\begin{center}\begin{tabular}{l r r r}"
             r"\toprule"
-            r"\textbf{M\'{e}trica} & \textbf{Esta Intern.} & "
-            r"\textbf{M\'{e}dia Hospital} & \textbf{Desvio} \\"
+            r"\textbf{Métrica} & \textbf{Esta Intern.} & "
+            r"\textbf{Média Hospital} & \textbf{Desvio} \\"
             r"\midrule"
         )
         rows_bl = []
@@ -1093,7 +1103,7 @@ def _build_justification(a: dict, similar_map: dict, similar_details: dict,
     # ── Similar admissions comparison ──
     similar = similar_map.get((src, iid), [])
     if similar:
-        L.append(r"\vspace{2pt}{\footnotesize\textbf{Interna\c{c}\~{o}es Similares (cosine):}\\[2pt]}")
+        L.append(r"\vspace{2pt}{\footnotesize\textbf{Internações Similares (cosine):}\\[2pt]}")
         L.append(
             r"\begin{tabular}{l r r r l}"
             r"\toprule"
@@ -1132,7 +1142,7 @@ def _build_justification(a: dict, similar_map: dict, similar_details: dict,
             if vl_total > avg_sim_bill * 1.2:
                 comparison_note = (
                     r"\multicolumn{5}{l}{\textcolor{anomred}{\small "
-                    r"$\rightarrow$ Esta interna\c{c}\~{a}o \'{e} significativamente "
+                    r"$\rightarrow$ Esta internação é significativamente "
                     r"mais cara que suas similares.}} \\"
                 )
                 L.append(comparison_note)
@@ -1140,7 +1150,7 @@ def _build_justification(a: dict, similar_map: dict, similar_details: dict,
 
     # ── Top deviating embedding dimensions ──
     if dim_info:
-        L.append(r"\vspace{2pt}{\footnotesize\textbf{Dimens\~{o}es de embedding mais desviantes:} ")
+        L.append(r"\vspace{2pt}{\footnotesize\textbf{Dimensões de embedding mais desviantes:} ")
         dim_parts = []
         for d, dz, meaning in dim_info[:4]:
             sign = "+" if dz >= 0 else ""
@@ -1214,7 +1224,7 @@ def _generate_latex(admissions: list[dict], similar_map: dict,
 
 \pagestyle{fancy}
 \fancyhf{}
-\fancyhead[L]{\textcolor{jcubeblue}{\textbf{JCUBE Digital Twin}} \textcolor{jcubegray}{\small | Relat\'{o}rio de Anomalias --- V4 (Explicado)}}
+\fancyhead[L]{\textcolor{jcubeblue}{\textbf{JCUBE Digital Twin}} \textcolor{jcubegray}{\small | Relatório de Anomalias --- V4 (Explicado)}}
 \fancyhead[R]{\textcolor{jcubegray}{\small 23/03/2026}}
 \fancyfoot[C]{\textcolor{jcubegray}{\thepage}}
 \renewcommand{\headrulewidth}{0.4pt}
@@ -1235,19 +1245,19 @@ def _generate_latex(admissions: list[dict], similar_map: dict,
 \begin{center}
 \vspace*{1.5cm}
 {\Huge\bfseries\textcolor{jcubeblue}{JCUBE}}\\[0.2cm]
-{\large\textcolor{jcubegray}{Digital Twin Analytics Platform --- Modelo V4 (Relat\'{o}rio Explicado)}}\\[1.2cm]
+{\large\textcolor{jcubegray}{Digital Twin Analytics Platform --- Modelo V4 (Relatório Explicado)}}\\[1.2cm]
 \begin{tcolorbox}[colback=jcubeblue,colframe=jcubeblue,coltext=white,width=0.92\textwidth,halign=center]
-{\LARGE\bfseries Relat\'{o}rio de Anomalias em Interna\c{c}\~{o}es}\\[0.3cm]
-{\large An\'{a}lise via Embeddings do G\^{e}meo Digital --- Graph-JEPA V4 (35,2M n\'{o}s $\times$ 64 dim)}\\[0.2cm]
-{\normalsize Com Justificativa de Auditoria por Interna\c{c}\~{a}o}
+{\LARGE\bfseries Relatório de Anomalias em Internações}\\[0.3cm]
+{\large Análise via Embeddings do Gêmeo Digital --- Graph-JEPA V4 (35,2M nós $\times$ 64 dim)}\\[0.2cm]
+{\normalsize Com Justificativa de Auditoria por Internação}
 \end{tcolorbox}
 \vspace{0.8cm}
 """)
     L.append(
-        r"{\Large Per\'{i}odo: \textbf{" + _escape_latex(START_DATE_STR) +
+        r"{\Large Período: \textbf{" + _escape_latex(START_DATE_STR) +
         r"} a \textbf{" + _escape_latex(REPORT_DATE_STR) + r"}}\\[0.4cm]"
     )
-    L.append(r"{\large Gerado em: \textbf{23 de mar\c{c}o de 2026}}\\[1.5cm]")
+    L.append(r"{\large Gerado em: \textbf{23 de março de 2026}}\\[1.5cm]")
 
     L.append(
         r"""\begin{tabular}{ccc}
@@ -1274,18 +1284,18 @@ def _generate_latex(admissions: list[dict], similar_map: dict,
     )
     if total_vl_fatura > 0:
         L.append(
-            r"LOS M\'{e}dio: \textbf{" + f"{avg_los:.1f}" +
+            r"LOS Médio: \textbf{" + f"{avg_los:.1f}" +
             r"} dias \quad | \quad Total Faturado: \textbf{" + _brl(total_vl_fatura) + r"}\\"
         )
     else:
-        L.append(r"LOS M\'{e}dio: \textbf{" + f"{avg_los:.1f}" + r"} dias\\")
+        L.append(r"LOS Médio: \textbf{" + f"{avg_los:.1f}" + r"} dias\\")
     L.append(r"""\end{tcolorbox}
 
 \vfill
 {\small\textcolor{jcubegray}{
-Metodologia: Z-score sobre dist\^{a}ncia euclidiana ao centr\'{o}ide dos embeddings JEPA V4\\
-Limiar: z $>$ """ + str(Z_THRESHOLD) + r""" --- Modelo V4: 35.2M n\'{o}s $\times$ 64 dim\\
-Cada anomalia inclui: Justificativa, Baseline do Hospital, Similares, Dimens\~{o}es de Embedding
+Metodologia: Z-score sobre distância euclidiana ao centróide dos embeddings JEPA V4\\
+Limiar: z $>$ """ + str(Z_THRESHOLD) + r""" --- Modelo V4: 35.2M nós $\times$ 64 dim\\
+Cada anomalia inclui: Justificativa, Baseline do Hospital, Similares, Dimensões de Embedding
 }}
 \end{center}
 \end{titlepage}
@@ -1294,30 +1304,30 @@ Cada anomalia inclui: Justificativa, Baseline do Hospital, Similares, Dimens\~{o
     L.append(r"\tableofcontents\clearpage")
 
     # ── Executive Summary ──
-    L.append(r"\section{Sum\'{a}rio Executivo}")
+    L.append(r"\section{Sumário Executivo}")
     L.append(
         r"""
-Este relat\'{o}rio apresenta \textbf{todas as interna\c{c}\~{o}es an\^{o}malas} detectadas pelo
-\textit{Digital Twin} JCUBE no per\'{i}odo de \textbf{""" +
+Este relatório apresenta \textbf{todas as internações anômalas} detectadas pelo
+\textit{Digital Twin} JCUBE no período de \textbf{""" +
         _escape_latex(START_DATE_STR) + r"""} a \textbf{""" +
         _escape_latex(REPORT_DATE_STR) + r"""}.
 
-Para cada anomalia, o relat\'{o}rio inclui uma \textbf{Justificativa de Auditoria} baseada em:
-compara\c{c}\~{a}o com o baseline do hospital, interna\c{c}\~{o}es semanticamente similares,
-an\'{a}lise das dimens\~{o}es de embedding mais desviantes e dados concretos do DuckDB.
+Para cada anomalia, o relatório inclui uma \textbf{Justificativa de Auditoria} baseada em:
+comparação com o baseline do hospital, internações semanticamente similares,
+análise das dimensões de embedding mais desviantes e dados concretos do DuckDB.
 
-\subsection{M\'{e}tricas Globais}
+\subsection{Métricas Globais}
 \begin{center}
 \begin{tabular}{lr}
 \toprule
-\textbf{M\'{e}trica} & \textbf{Valor} \\
+\textbf{Métrica} & \textbf{Valor} \\
 \midrule
 Total de anomalias detectadas & """ + str(total_anomalies) + r""" \\
 Sistemas hospitalares (fontes) & """ + str(len(sources)) + r""" \\
-Cr\'{i}ticos (z $\geq$ 5) & \textcolor{anomred}{\textbf{""" + str(total_critical) + r"""}} \\
+Críticos (z $\geq$ 5) & \textcolor{anomred}{\textbf{""" + str(total_critical) + r"""}} \\
 Altos (3 $\leq$ z $<$ 5) & \textcolor{anomorange}{\textbf{""" + str(total_high) + r"""}} \\
 Moderados (2 $\leq$ z $<$ 3) & \textcolor{anomyellow}{\textbf{""" + str(total_moderate) + r"""}} \\
-LOS m\'{e}dio das anomalias & """ + f"{avg_los:.1f}" + r""" dias \\
+LOS médio das anomalias & """ + f"{avg_los:.1f}" + r""" dias \\
 """
     )
     if total_vl_fatura > 0:
@@ -1334,7 +1344,7 @@ LOS m\'{e}dio das anomalias & """ + f"{avg_los:.1f}" + r""" dias \\
     L.append(r"""\begin{center}
 \begin{longtable}{lrrrr}
 \toprule
-\textbf{Sistema / Fonte} & \textbf{Total} & \textbf{Cr\'{i}t.} & \textbf{Alto} & \textbf{LOS M\'{e}d.} \\
+\textbf{Sistema / Fonte} & \textbf{Total} & \textbf{Crít.} & \textbf{Alto} & \textbf{LOS Méd.} \\
 \midrule
 \endhead
 \bottomrule
@@ -1375,10 +1385,10 @@ LOS m\'{e}dio das anomalias & """ + f"{avg_los:.1f}" + r""" dias \\
             section_label + r"""}}]
 \begin{tabular}{ll@{\quad}ll@{\quad}ll}
 Total: \textbf{""" + str(n) + r"""} &
-Cr\'{i}t.: \textcolor{anomred}{\textbf{""" + str(nc) + r"""}} &
+Crít.: \textcolor{anomred}{\textbf{""" + str(nc) + r"""}} &
 Altos: \textcolor{anomorange}{\textbf{""" + str(nh) + r"""}} &
 Mod.: \textcolor{anomyellow}{\textbf{""" + str(nm) + r"""}} &
-LOS m\'{e}d.: \textbf{""" + f"{avg_l:.1f}" + r"""d} &
+LOS méd.: \textbf{""" + f"{avg_l:.1f}" + r"""d} &
 Maior z: \textbf{""" + f"{max_z:.2f}" + r"""} \\
 """
         )
@@ -1396,7 +1406,7 @@ Maior z: \textbf{""" + f"{max_z:.2f}" + r"""} \\
         L.append(r"""\begin{center}
 \begin{longtable}{>{\scriptsize}r>{\scriptsize}r>{\scriptsize}c>{\scriptsize}c>{\scriptsize}r>{\scriptsize}r>{\scriptsize}r>{\scriptsize}r}
 \toprule
-\textbf{Intern.} & \textbf{Pac.} & \textbf{Admiss\~{a}o} & \textbf{Alta} & \textbf{LOS} & \textbf{Z} & \textbf{Faturado} & \textbf{Glosado} \\
+\textbf{Intern.} & \textbf{Pac.} & \textbf{Admissão} & \textbf{Alta} & \textbf{LOS} & \textbf{Z} & \textbf{Faturado} & \textbf{Glosado} \\
 \midrule
 \endhead
 \bottomrule
@@ -1445,12 +1455,12 @@ Maior z: \textbf{""" + f"{max_z:.2f}" + r"""} \\
 
             # Header: Patient, dates, hospital
             L.append(
-                r"\textbf{Dados da Interna\c{c}\~{a}o:} " +
+                r"\textbf{Dados da Internação:} " +
                 r"Paciente \#" + str(pid) +
-                r" $\mid$ Admiss\~{a}o: " + adm +
+                r" $\mid$ Admissão: " + adm +
                 r" $\mid$ Alta: " + alta +
                 r" $\mid$ LOS: \textbf{" + str(los) + r"d}" +
-                r" $\mid$ Readmiss\~{a}o {<}30d: " + readmit_flag + r"\\"
+                r" $\mid$ Readmissão {<}30d: " + readmit_flag + r"\\"
             )
             L.append(
                 r"\textbf{Hospital:} " + nm_hosp +
@@ -1470,8 +1480,8 @@ Maior z: \textbf{""" + f"{max_z:.2f}" + r"""} \\
                     L.append(r"\textbf{CIDs:} {\scriptsize " + all_cids + r"}\\" + "\n")
 
             for label, field, maxl in [
-                ("Diagn.\\'{o}stico", "DS_DESCRICAO", 180),
-                ("Hist\\'{o}rico",    "DS_HISTORICO", 180),
+                ("Diagn.\óstico", "DS_DESCRICAO", 180),
+                ("Hist\órico",    "DS_HISTORICO", 180),
                 ("Motivo",            "DS_MOTIVO",    130),
             ]:
                 val = _truncate(str(a.get(field) or ""), maxl)
@@ -1501,7 +1511,7 @@ Maior z: \textbf{""" + f"{max_z:.2f}" + r"""} \\
                         r" & VL SADT & " + _brl(fat.get("vl_sadt")) + r" \\" + "\n"
                     )
                     L.append(
-                        r"VL L\'{i}q. & " + _brl(fat.get("vl_liquido")) +
+                        r"VL Líq. & " + _brl(fat.get("vl_liquido")) +
                         r" & Glosa Fat. & \textcolor{anomred}{" + _brl(fat.get("vl_glosa_total")) + r"}" +
                         r" & Diverg. & \textcolor{anomorange}{" + _brl(fat.get("vl_divergencia")) + r"}" +
                         r" \\" + "\n"
@@ -1514,7 +1524,7 @@ Maior z: \textbf{""" + f"{max_z:.2f}" + r"""} \\
                         r" & Aceito & " + _brl(glo.get("vl_aceito")) + r" \\" + "\n"
                     )
                 if neg:
-                    L.append(r"\midrule\multicolumn{6}{c}{\textbf{Negocia\c{c}\~{o}es de Auditoria}}\\\midrule" + "\n")
+                    L.append(r"\midrule\multicolumn{6}{c}{\textbf{Negociações de Auditoria}}\\\midrule" + "\n")
                     tipos = _escape_latex(_truncate(str(neg.get("tipos_negociacao") or ""), 60))
                     L.append(
                         r"N Negoc. & \textbf{" + str(_safe_int(neg.get("n_negociacoes"))) + r"}" +
@@ -1536,7 +1546,7 @@ Maior z: \textbf{""" + f"{max_z:.2f}" + r"""} \\
                 r"\vspace{2pt}{\footnotesize " +
                 r"\textbf{Proced.:} " + str(_safe_int(proc.get("n_procedimentos"))) +
                 r"\quad\textbf{Exames:} " + str(_safe_int(exm.get("n_exames"))) +
-                r"\quad\textbf{Evolu\c{c}\~{o}es:} " + str(_safe_int(evo.get("n_evolucoes"))) +
+                r"\quad\textbf{Evoluções:} " + str(_safe_int(evo.get("n_evolucoes"))) +
                 r"\quad\textbf{Audit. RAH:} " + str(_safe_int(aud.get("n_auditorias"))) +
                 r"\quad\textbf{Eventos Adv.:} " + str(_safe_int(ev.get("n_eventos"))) +
                 r"\quad\textbf{Itens Fat.:} " + str(_safe_int(fit.get("n_itens"))) +
@@ -1549,23 +1559,23 @@ Maior z: \textbf{""" + f"{max_z:.2f}" + r"""} \\
         L.append(r"\clearpage")
 
     # ── Appendix ──
-    L.append(r"\section*{Ap\^{e}ndice: Metodologia de Detec\c{c}\~{a}o e Justifica\c{c}\~{a}o}")
-    L.append(r"\addcontentsline{toc}{section}{Ap\^{e}ndice: Metodologia}")
+    L.append(r"\section*{Apêndice: Metodologia de Detecção e Justificação}")
+    L.append(r"\addcontentsline{toc}{section}{Apêndice: Metodologia}")
     L.append(r"""
 \subsection*{1. Modelo Graph-JEPA V4}
-O modelo \textit{Graph-JEPA V4} foi treinado sobre o grafo de conhecimento JCUBE com \textbf{35,2M n\'{o}s}
-e \textbf{64 dimens\~{o}es} de embedding. Cada n\'{o} representa uma entidade (interna\c{c}\~{a}o, paciente,
-fatura, m\'{e}dico, etc.) e as arestas representam rela\c{c}\~{o}es entre elas.
+O modelo \textit{Graph-JEPA V4} foi treinado sobre o grafo de conhecimento JCUBE com \textbf{35,2M nós}
+e \textbf{64 dimensões} de embedding. Cada nó representa uma entidade (internação, paciente,
+fatura, médico, etc.) e as arestas representam relações entre elas.
 
-\subsection*{2. Detec\c{c}\~{a}o de Anomalias via Z-score}
-Para cada interna\c{c}\~{a}o com n\'{o} no grafo:
+\subsection*{2. Detecção de Anomalias via Z-score}
+Para cada internação com nó no grafo:
 \begin{enumerate}[nosep]
-  \item Calcula-se a \textbf{dist\^{a}ncia euclidiana} do embedding ao \textbf{centr\'{o}ide} de todas as interna\c{c}\~{o}es.
-  \item Calcula-se o \textbf{z-score}: $z = \frac{d - \mu}{\sigma}$, onde $\mu$ e $\sigma$ s\~{a}o a m\'{e}dia e desvio padr\~{a}o das dist\^{a}ncias.
-  \item Interna\c{c}\~{o}es com $z > """ + str(Z_THRESHOLD) + r"""$ s\~{a}o classificadas como an\^{o}malas.
+  \item Calcula-se a \textbf{distância euclidiana} do embedding ao \textbf{centróide} de todas as internações.
+  \item Calcula-se o \textbf{z-score}: $z = \frac{d - \mu}{\sigma}$, onde $\mu$ e $\sigma$ são a média e desvio padrão das distâncias.
+  \item Internações com $z > """ + str(Z_THRESHOLD) + r"""$ são classificadas como anômalas.
 \end{enumerate}
 
-\subsection*{3. Classifica\c{c}\~{a}o de Severidade}
+\subsection*{3. Classificação de Severidade}
 \begin{itemize}[nosep]
   \item \textcolor{anomred}{\textbf{CR\'ITICO}}: z $\geq$ 5
   \item \textcolor{anomorange}{\textbf{ALTO}}: 3 $\leq$ z $<$ 5
@@ -1573,25 +1583,25 @@ Para cada interna\c{c}\~{a}o com n\'{o} no grafo:
 \end{itemize}
 
 \subsection*{4. Justificativa de Auditoria (Novo em V2)}
-Para cada anomalia, o relat\'{o}rio calcula:
+Para cada anomalia, o relatório calcula:
 \begin{itemize}[nosep]
-  \item \textbf{Baseline do hospital}: m\'{e}dia de LOS, faturamento, procedimentos, exames e glosas
-    para todas as interna\c{c}\~{o}es do mesmo hospital no per\'{i}odo.
-  \item \textbf{Interna\c{c}\~{o}es similares}: as 5 interna\c{c}\~{o}es com maior similaridade por cosseno
-    no espa\c{c}o de embeddings, com seus LOS e faturamentos reais.
-  \item \textbf{Dimens\~{o}es de embedding}: as dimens\~{o}es que mais desviam do centr\'{o}ide,
+  \item \textbf{Baseline do hospital}: média de LOS, faturamento, procedimentos, exames e glosas
+    para todas as internações do mesmo hospital no período.
+  \item \textbf{Internações similares}: as 5 internações com maior similaridade por cosseno
+    no espaço de embeddings, com seus LOS e faturamentos reais.
+  \item \textbf{Dimensões de embedding}: as dimensões que mais desviam do centróide,
     mapeadas para seu significado funcional (faturamento, procedimentos, glosa, etc.).
-  \item \textbf{Readmiss\~{a}o}: se o paciente foi readmitido em menos de 30 dias.
+  \item \textbf{Readmissão}: se o paciente foi readmitido em menos de 30 dias.
 \end{itemize}
 
-\subsection*{5. Mapeamento de Dimens\~{o}es de Embedding}
+\subsection*{5. Mapeamento de Dimensões de Embedding}
 \begin{itemize}[nosep]
-  \item dim[16]: padr\~{a}o de faturamento
-  \item dim[28]: complexidade cl\'{i}nica
+  \item dim[16]: padrão de faturamento
+  \item dim[28]: complexidade clínica
   \item dim[30]: volume de procedimentos
-  \item dim[46]: trajet\'{o}ria temporal
+  \item dim[46]: trajetória temporal
   \item dim[53]: risco de glosa
-  \item dim[61]: padr\~{a}o operacional
+  \item dim[61]: padrão operacional
 \end{itemize}
 """)
     L.append(r"\end{document}")
