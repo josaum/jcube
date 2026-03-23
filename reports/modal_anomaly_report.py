@@ -978,10 +978,10 @@ def _build_justification(a: dict, similar_map: dict, similar_details: dict,
         summary_parts.append(f"taxa de glosa de {glosa_rate:.0f}\\%")
 
     if n_evo > 0:
-        summary_parts.append(f"{n_evo} evolu\\c{{c}}\\~{{o}}es clínicas")
+        summary_parts.append(f"{n_evo} evoluções clínicas")
 
     if readmit:
-        summary_parts.append("readmiss\\~{{a}}o em menos de 30 dias")
+        summary_parts.append("readmissão em menos de 30 dias")
 
     # Embedding dimension deviation
     dim_info = dim_analysis.get((src, iid), [])
@@ -1448,7 +1448,7 @@ Maior z: \textbf{""" + f"{max_z:.2f}" + r"""} \\
             readmit_flag = r"\textcolor{anomred}{\textbf{SIM}}" if readmit else "N\u00e3o"
 
             card_title = (
-                f"Interna\\c{{c}}\\~{{a}}o \\#{iid} | {section_label} | "
+                f"Internação \\#{iid} | {section_label} | "
                 f"{severity} (z={z:.2f})"
             )
             L.append(r"\begin{anomalycard}[" + card_title + r"]{" + color + r"}")
