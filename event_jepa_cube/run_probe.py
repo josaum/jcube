@@ -12,6 +12,7 @@ cache_volume = modal.Volume.from_name("jepa-cache")
 probe_image = (
     modal.Image.debian_slim(python_version="3.12")
     .pip_install(
+        "lightgbm>=4.0",
         "torch>=2.6",
         "numpy>=2.0",
         "pyarrow>=18.0",
@@ -152,18 +153,18 @@ def run_probes():
             print(f"    {names[i]:45s}  z={z[i]:.2f}")
 
     # ================================================================
-    # PROBE C: Glosa Risk (supervised — binary classification)
+    # PROBE C: Glosa Risk (LightGBM classifier with CV tuning)
     # ================================================================
     print("\n" + "=" * 60)
-    print("[PROBE C] GLOSA (BILLING DENIAL) PREDICTION")
+    print("[PROBE C] GLOSA (BILLING DENIAL) — LightGBM")
     print("=" * 60)
     import duckdb
-    from sklearn.linear_model import LogisticRegression
-    from sklearn.metrics import roc_auc_score, classification_report
+    import lightgbm as lgb
+    from sklearn.model_selection import StratifiedKFold
+    from sklearn.metrics import roc_auc_score, classification_report, average_precision_score
 
     try:
         con = duckdb.connect(DB, read_only=True)
-        # Include source_db to build full V4 node keys
         glosa_q = """
             SELECT source_db,
                    CAST(ID_CD_INTERNACAO AS VARCHAR) AS eid,
@@ -177,7 +178,6 @@ def run_probes():
 
         X_list, y_list = [], []
         for source_db, eid, label in rows:
-            # Try V4 format first, then V3
             for key in [f"{source_db}/ID_CD_INTERNACAO_{eid}", f"ID_CD_INTERNACAO_{eid}"]:
                 if key in node_to_idx:
                     X_list.append(embeddings[node_to_idx[key]])
@@ -188,35 +188,104 @@ def run_probes():
             X = np.array(X_list)
             y = np.array(y_list)
             n_pos = int(y.sum())
+            n_neg = len(y) - n_pos
             print(f"  Dataset: {len(y):,} admissions, {n_pos:,} with glosa ({100*n_pos/len(y):.1f}%)")
 
             perm = np.random.RandomState(42).permutation(len(y))
             split = int(len(y) * 0.8)
-            tr, te = perm[:split], perm[split:]
+            X_train, X_test = X[perm[:split]], X[perm[split:]]
+            y_train, y_test = y[perm[:split]], y[perm[split:]]
 
-            clf = LogisticRegression(max_iter=1000, class_weight="balanced")
-            clf.fit(X[tr], y[tr])
-            probs = clf.predict_proba(X[te])[:, 1]
-            preds = clf.predict(X[te])
-            auc = roc_auc_score(y[te], probs)
-            print(f"\n  ROC-AUC: {auc:.4f}")
-            print(classification_report(y[te], preds, target_names=["No Glosa", "Glosa"]))
+            # Hyperparameter search via 3-fold CV on train set
+            best_auc = 0.0
+            best_params = {}
+            param_grid = [
+                {"n_estimators": 300, "max_depth": 4, "learning_rate": 0.05, "num_leaves": 15, "min_child_samples": 50},
+                {"n_estimators": 500, "max_depth": 6, "learning_rate": 0.03, "num_leaves": 31, "min_child_samples": 30},
+                {"n_estimators": 800, "max_depth": 8, "learning_rate": 0.01, "num_leaves": 63, "min_child_samples": 20},
+                {"n_estimators": 500, "max_depth": 5, "learning_rate": 0.05, "num_leaves": 24, "min_child_samples": 40},
+                {"n_estimators": 1000, "max_depth": 7, "learning_rate": 0.01, "num_leaves": 48, "min_child_samples": 25},
+            ]
+
+            scale_pos = n_neg / max(n_pos, 1)
+            print(f"  scale_pos_weight: {scale_pos:.2f}")
+            print(f"  Tuning {len(param_grid)} configs via 3-fold CV...")
+
+            skf = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
+
+            for i, params in enumerate(param_grid):
+                fold_aucs = []
+                for train_idx, val_idx in skf.split(X_train, y_train):
+                    clf = lgb.LGBMClassifier(
+                        **params,
+                        scale_pos_weight=scale_pos,
+                        subsample=0.8,
+                        colsample_bytree=0.8,
+                        reg_alpha=0.1,
+                        reg_lambda=1.0,
+                        random_state=42,
+                        verbose=-1,
+                        n_jobs=-1,
+                    )
+                    clf.fit(X_train[train_idx], y_train[train_idx])
+                    probs = clf.predict_proba(X_train[val_idx])[:, 1]
+                    fold_aucs.append(roc_auc_score(y_train[val_idx], probs))
+
+                mean_auc = np.mean(fold_aucs)
+                print(f"    Config {i+1}: CV AUC={mean_auc:.4f} (depth={params['max_depth']}, lr={params['learning_rate']}, n={params['n_estimators']})")
+                if mean_auc > best_auc:
+                    best_auc = mean_auc
+                    best_params = params
+
+            print(f"\n  Best CV AUC: {best_auc:.4f}")
+            print(f"  Best params: depth={best_params['max_depth']}, lr={best_params['learning_rate']}, n={best_params['n_estimators']}")
+
+            # Train final model on full train set
+            final_clf = lgb.LGBMClassifier(
+                **best_params,
+                scale_pos_weight=scale_pos,
+                subsample=0.8,
+                colsample_bytree=0.8,
+                reg_alpha=0.1,
+                reg_lambda=1.0,
+                random_state=42,
+                verbose=-1,
+                n_jobs=-1,
+            )
+            final_clf.fit(X_train, y_train)
+            probs = final_clf.predict_proba(X_test)[:, 1]
+            preds = final_clf.predict(X_test)
+            auc = roc_auc_score(y_test, probs)
+            ap = average_precision_score(y_test, probs)
+
+            print(f"\n  === TEST SET RESULTS ===")
+            print(f"  ROC-AUC: {auc:.4f}")
+            print(f"  Average Precision: {ap:.4f}")
+            print(classification_report(y_test, preds, target_names=["No Glosa", "Glosa"]))
+
+            # Feature importance (top 10 embedding dimensions)
+            importances = final_clf.feature_importances_
+            top_dims = np.argsort(-importances)[:10]
+            print(f"  Top 10 embedding dimensions for glosa prediction:")
+            for d in top_dims:
+                print(f"    dim[{d:>2}]: importance={importances[d]}")
+
         else:
-            print(f"  Only {len(X_list)} matched — not enough for probe")
+            print(f"  Only {len(X_list)} matched — not enough")
     except Exception as e:
+        import traceback
         print(f"  SKIP: {e}")
+        traceback.print_exc()
 
     # ================================================================
-    # PROBE D: Length of Stay (supervised — regression)
+    # PROBE D: Length of Stay (LightGBM regressor with CV tuning)
     # ================================================================
     print("\n" + "=" * 60)
-    print("[PROBE D] LENGTH OF STAY PREDICTION")
+    print("[PROBE D] LENGTH OF STAY — LightGBM")
     print("=" * 60)
-    from sklearn.linear_model import Ridge
 
     try:
         con = duckdb.connect(DB, read_only=True)
-        # Actual LOS: admission date → finalization date, with source_db for V4 matching
         los_q = """
             SELECT source_db,
                    CAST(ID_CD_INTERNACAO AS VARCHAR) AS eid,
@@ -241,27 +310,109 @@ def run_probes():
             X = np.array(X_list)
             y = np.array(y_list)
             print(f"  Dataset: {len(y):,} admissions")
-            print(f"  LOS range: {y.min():.0f} - {y.max():.0f} days, median={np.median(y):.0f}")
+            print(f"  LOS range: {y.min():.0f} - {y.max():.0f} days, median={np.median(y):.0f}, mean={y.mean():.1f}")
 
             perm = np.random.RandomState(42).permutation(len(y))
             split = int(len(y) * 0.8)
-            tr, te = perm[:split], perm[split:]
+            X_train, X_test = X[perm[:split]], X[perm[split:]]
+            y_train, y_test = y[perm[:split]], y[perm[split:]]
 
-            model = Ridge(alpha=1.0)
-            model.fit(X[tr], y[tr])
-            preds = model.predict(X[te])
-            actuals = y[te]
+            # Log-transform target (LOS is right-skewed)
+            y_train_log = np.log1p(y_train)
+            y_test_log = np.log1p(y_test)
+
+            # Hyperparameter search
+            best_mae = float("inf")
+            best_params = {}
+            param_grid = [
+                {"n_estimators": 300, "max_depth": 4, "learning_rate": 0.05, "num_leaves": 15, "min_child_samples": 50},
+                {"n_estimators": 500, "max_depth": 6, "learning_rate": 0.03, "num_leaves": 31, "min_child_samples": 30},
+                {"n_estimators": 800, "max_depth": 8, "learning_rate": 0.01, "num_leaves": 63, "min_child_samples": 20},
+                {"n_estimators": 500, "max_depth": 5, "learning_rate": 0.05, "num_leaves": 24, "min_child_samples": 40},
+                {"n_estimators": 1000, "max_depth": 10, "learning_rate": 0.01, "num_leaves": 96, "min_child_samples": 15},
+            ]
+
+            from sklearn.model_selection import KFold
+            kf = KFold(n_splits=3, shuffle=True, random_state=42)
+
+            print(f"  Tuning {len(param_grid)} configs via 3-fold CV (log-transformed target)...")
+
+            for i, params in enumerate(param_grid):
+                fold_maes = []
+                for train_idx, val_idx in kf.split(X_train):
+                    reg = lgb.LGBMRegressor(
+                        **params,
+                        subsample=0.8,
+                        colsample_bytree=0.8,
+                        reg_alpha=0.1,
+                        reg_lambda=1.0,
+                        random_state=42,
+                        verbose=-1,
+                        n_jobs=-1,
+                    )
+                    reg.fit(X_train[train_idx], y_train_log[train_idx])
+                    preds_log = reg.predict(X_train[val_idx])
+                    preds_days = np.expm1(preds_log)
+                    fold_maes.append(np.mean(np.abs(y_train[val_idx] - preds_days)))
+
+                mean_mae = np.mean(fold_maes)
+                print(f"    Config {i+1}: CV MAE={mean_mae:.2f} days (depth={params['max_depth']}, lr={params['learning_rate']}, n={params['n_estimators']})")
+                if mean_mae < best_mae:
+                    best_mae = mean_mae
+                    best_params = params
+
+            print(f"\n  Best CV MAE: {best_mae:.2f} days")
+            print(f"  Best params: depth={best_params['max_depth']}, lr={best_params['learning_rate']}, n={best_params['n_estimators']}")
+
+            # Train final model
+            final_reg = lgb.LGBMRegressor(
+                **best_params,
+                subsample=0.8,
+                colsample_bytree=0.8,
+                reg_alpha=0.1,
+                reg_lambda=1.0,
+                random_state=42,
+                verbose=-1,
+                n_jobs=-1,
+            )
+            final_reg.fit(X_train, y_train_log)
+            preds_log = final_reg.predict(X_test)
+            preds = np.expm1(preds_log)
+            actuals = y_test
 
             ss_res = np.sum((actuals - preds) ** 2)
             ss_tot = np.sum((actuals - actuals.mean()) ** 2)
             r2 = 1.0 - ss_res / max(ss_tot, 1e-8)
             mae = np.mean(np.abs(actuals - preds))
-            print(f"\n  R² = {r2:.4f}")
-            print(f"  MAE = {mae:.1f} days")
+            mape = np.mean(np.abs(actuals - preds) / actuals.clip(min=1)) * 100
+            median_ae = np.median(np.abs(actuals - preds))
+
+            print(f"\n  === TEST SET RESULTS ===")
+            print(f"  R²   = {r2:.4f}")
+            print(f"  MAE  = {mae:.2f} days")
+            print(f"  MedAE = {median_ae:.2f} days")
+            print(f"  MAPE = {mape:.1f}%")
+
+            # Bucketed accuracy
+            for bucket_name, lo, hi in [("Short (1-3d)", 1, 3), ("Medium (4-14d)", 4, 14), ("Long (15-60d)", 15, 60), ("Extended (60+d)", 60, 365)]:
+                mask_b = (actuals >= lo) & (actuals <= hi)
+                if mask_b.sum() > 0:
+                    bucket_mae = np.mean(np.abs(actuals[mask_b] - preds[mask_b]))
+                    print(f"    {bucket_name:20s}: n={mask_b.sum():>6,}  MAE={bucket_mae:.1f} days")
+
+            # Feature importance
+            importances = final_reg.feature_importances_
+            top_dims = np.argsort(-importances)[:10]
+            print(f"\n  Top 10 embedding dimensions for LOS:")
+            for d in top_dims:
+                print(f"    dim[{d:>2}]: importance={importances[d]}")
+
         else:
             print(f"  Only {len(X_list)} matched — not enough")
     except Exception as e:
+        import traceback
         print(f"  SKIP: {e}")
+        traceback.print_exc()
 
     # ================================================================
     # PROBE E: Semantic Search Demo
