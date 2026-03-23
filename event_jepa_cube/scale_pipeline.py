@@ -820,12 +820,23 @@ def train_tkg_jepa(
     if onto_indices:
         frozen_mask[torch.tensor(onto_indices, dtype=torch.long)] = True
 
+    # Compute node_time: max edge timestamp per node (latest known state)
+    print("  Computing node timestamps (max edge time per node)...")
+    node_time = torch.zeros(num_nodes, dtype=torch.int64)
+    src_nodes = edge_index[0]
+    dst_nodes = edge_index[1]
+    # Scatter max over both source and target edges
+    node_time.scatter_reduce_(0, src_nodes, edge_time, reduce="amax", include_self=False)
+    node_time.scatter_reduce_(0, dst_nodes, edge_time, reduce="amax", include_self=False)
+    print(f"  Node time range: {node_time.min().item()} — {node_time.max().item()}")
+
     # Create Data object (on CPU for NeighborLoader)
     graph_data = Data(
         x=torch.arange(num_nodes),  # node indices (features loaded in forward pass)
         edge_index=edge_index,
         edge_attr=edge_attr,
         edge_time=edge_time,
+        node_time=node_time,
         num_nodes=num_nodes,
     )
 
@@ -833,32 +844,78 @@ def train_tkg_jepa(
     # Model definition
     # ================================================================
 
-    class TemporalGNNEncoder(nn.Module):
-        """2-layer Temporal Graph Transformer.
+    class ContinuousTemporalEncoder(nn.Module):
+        """Continuous Temporal Positional Encoding Φ(Δt).
 
-        Uses TransformerConv which applies multi-head attention over edges,
-        naturally weighting relationships by their edge attributes (predicate type).
+        Learnable harmonic encoder maps continuous time deltas to dense vectors.
+        Adapts to the specific temporal scales of hospital data (hours/days/months).
         """
-        def __init__(self, dim: int, n_preds: int, heads: int = 4):
+        def __init__(self, time_dim: int):
             super().__init__()
-            # Predicate embedding (edge features)
+            assert time_dim % 2 == 0, "time_dim must be even"
+            self.time_dim = time_dim
+            self.omega = nn.Parameter(torch.empty(1, time_dim // 2))
+            self.phi = nn.Parameter(torch.empty(1, time_dim // 2))
+            nn.init.xavier_uniform_(self.omega)
+            nn.init.zeros_(self.phi)
+
+        def forward(self, delta_t: torch.Tensor) -> torch.Tensor:
+            delta_t = delta_t.view(-1, 1).float()
+            # Normalize to days for numerical stability
+            delta_t_days = delta_t / 86400.0
+            phase = delta_t_days * self.omega + self.phi
+            return torch.cat([torch.sin(phase), torch.cos(phase)], dim=-1)
+
+    class TemporalGNNEncoder(nn.Module):
+        """2-layer Causal Spatio-Temporal Graph Transformer.
+
+        V4: Injects continuous temporal encoding Φ(Δt) into edge attributes.
+        Δt = t_target_node - t_edge. Future edges (Δt < 0) are masked out,
+        enforcing strict causality in the message passing.
+        """
+        def __init__(self, dim: int, n_preds: int, time_dim: int = 16, heads: int = 4):
+            super().__init__()
             self.pred_emb = nn.Embedding(n_preds, dim)
+            self.time_encoder = ContinuousTemporalEncoder(time_dim)
+
+            # Edge dim = predicate embedding + temporal encoding
+            edge_dim = dim + time_dim
 
             self.conv1 = TransformerConv(
                 in_channels=dim, out_channels=dim // heads,
-                heads=heads, edge_dim=dim, concat=True,
+                heads=heads, edge_dim=edge_dim, concat=True, beta=True,
             )
             self.norm1 = nn.LayerNorm(dim)
 
             self.conv2 = TransformerConv(
                 in_channels=dim, out_channels=dim // heads,
-                heads=heads, edge_dim=dim, concat=True,
+                heads=heads, edge_dim=edge_dim, concat=True, beta=True,
             )
             self.norm2 = nn.LayerNorm(dim)
 
-        def forward(self, x, edge_index, edge_attr):
-            # edge_attr is predicate int → embed to dim-vector
+        def forward(self, x, edge_index, edge_attr, node_time=None, edge_time=None):
+            # Predicate embedding
             e = self.pred_emb(edge_attr)
+
+            # Temporal encoding (V4)
+            if node_time is not None and edge_time is not None:
+                target_nodes = edge_index[1]
+                t_target = node_time[target_nodes]
+                delta_t = t_target - edge_time
+
+                # Strict causality: mask out future edges (Δt < 0)
+                causal_mask = delta_t >= 0
+                if not causal_mask.all():
+                    edge_index = edge_index[:, causal_mask]
+                    delta_t = delta_t[causal_mask]
+                    e = e[causal_mask]
+
+                phi_t = self.time_encoder(delta_t)
+                e = torch.cat([e, phi_t], dim=-1)
+            else:
+                # Fallback: zero temporal encoding (backward compatible with V3)
+                zeros = torch.zeros(e.shape[0], self.time_encoder.time_dim, device=e.device)
+                e = torch.cat([e, zeros], dim=-1)
 
             h = self.conv1(x, edge_index, e)
             h = self.norm1(h)
@@ -989,12 +1046,18 @@ def train_tkg_jepa(
             # Get node features from embedding table
             x = node_emb(batch.x.to(device))  # (N_batch, latent_dim)
 
-            # --- Online encoder (context) ---
-            ctx_repr = online_encoder(x, batch.edge_index, batch.edge_attr)
+            # --- Temporal info from batch ---
+            batch_node_time = batch.node_time.to(device) if hasattr(batch, 'node_time') else None
+            batch_edge_time = batch.edge_time.to(device) if hasattr(batch, 'edge_time') else None
 
-            # --- Target encoder (EMA, no grad) ---
+            # --- Online encoder (context) with temporal causality ---
+            ctx_repr = online_encoder(x, batch.edge_index, batch.edge_attr,
+                                       node_time=batch_node_time, edge_time=batch_edge_time)
+
+            # --- Target encoder (EMA, no grad) with temporal causality ---
             with torch.no_grad():
-                tgt_repr = target_encoder(x, batch.edge_index, batch.edge_attr)
+                tgt_repr = target_encoder(x, batch.edge_index, batch.edge_attr,
+                                           node_time=batch_node_time, edge_time=batch_edge_time)
 
             # Target = first B nodes (the input_nodes for this batch)
             ctx_target = ctx_repr[:B]   # (B, D)
