@@ -153,11 +153,11 @@ class MyceliaStore:
 
         body: dict[str, Any] = {
             "name": name,
-            "dimension": dimension,
             "modality": modality,
+            "model": {"dimension": dimension},
         }
         if model:
-            body["model"] = model
+            body["model"] = model if isinstance(model, dict) else {"name": model, "dimension": dimension}
         result = self._post("/v2/collections", body)
         logger.info("Created Mycelia collection %r (dim=%d)", name, dimension)
         return result
