@@ -49,6 +49,23 @@ TIMESTAMP_PRIORITY = [
     "DH_ATUALIZACAO", "DT_INTER", "DT_ALTA", "DT_NASC",
 ]
 
+# Instance entity types get source_db prefix to avoid cross-hospital ID collisions.
+# Ontology types (codes, categories, procedures) stay global — same CID means the same thing everywhere.
+INSTANCE_TYPES = {
+    'PACIENTE', 'INTERNACAO', 'BENEFICIARIO', 'FATURA', 'PESSOA',
+    'ORCAMENTO', 'HOSPITAL', 'COOPERADO', 'EVOLUCAO', 'COTACAO',
+    'TERCEIRO', 'RELATORIO', 'AUDITORIA', 'LEITO', 'MEDICO',
+    'RH', 'LOGIN', 'ACESSO', 'PERMISSAO', 'TICKETS',
+    'LOG', 'STATUS', 'CONTROLE', 'CAPTA', 'PS', 'ITEM',
+    'AVEXAME', 'AVESP', 'ENVIO', 'NEGOCIACAO', 'OXITERAPIA',
+    'VISITA', 'FEEDBACK', 'PROTOCOLO', 'INTERACAO', 'PRODUTO',
+    'RESPOSTA', 'QUESTIONARIO', 'EQPMULTI', 'CAMPO', 'HISTORICO',
+    'LOCALIZACAO', 'DADO', 'CONTATO', 'ENDERECO', 'TELEFONE',
+    'EMAIL', 'MENSAGEM', 'ARQUIVO', 'ARQ', 'ANEXO', 'EQUIPE',
+    'SOLICITACAO', 'DATA', 'HEMOTERAPIA', 'PREV', 'PRE',
+    'LANCAMENTO', 'PARCELA', 'CONTEXTO', 'AUXILIAR', 'SAIDAPRODS',
+}
+
 _TS_TYPES = {"TIMESTAMP", "TIMESTAMP WITH TIME ZONE", "DATE", "DATETIME", "TIMESTAMPTZ"}
 
 
@@ -96,14 +113,28 @@ def _build_triples_query(catalog_path: str) -> tuple[str, dict]:
                 break
 
         subject_col = id_cols[0]
+        subj_type = subject_col.replace("ID_CD_", "")
         for obj_col in id_cols[1:]:
-            pred_name = f"HAS_{obj_col.replace('ID_CD_', '')}_VIA_{t_name}"
+            obj_type = obj_col.replace("ID_CD_", "")
+            pred_name = f"HAS_{obj_type}_VIA_{t_name}"
             stats["predicates"] += 1
+
+            # Instance types get source_db prefix; ontology stays global
+            if subj_type in INSTANCE_TYPES:
+                subj_expr = f"source_db || '/' || '{subject_col}_' || CAST(\"{subject_col}\" AS VARCHAR)"
+            else:
+                subj_expr = f"'{subject_col}_' || CAST(\"{subject_col}\" AS VARCHAR)"
+
+            if obj_type in INSTANCE_TYPES:
+                obj_expr = f"source_db || '/' || '{obj_col}_' || CAST(\"{obj_col}\" AS VARCHAR)"
+            else:
+                obj_expr = f"'{obj_col}_' || CAST(\"{obj_col}\" AS VARCHAR)"
+
             selects.append(
                 f"SELECT "
-                f"'{subject_col}_' || CAST(\"{subject_col}\" AS VARCHAR) AS subject_id, "
+                f"{subj_expr} AS subject_id, "
                 f"'{pred_name}' AS predicate, "
-                f"'{obj_col}_' || CAST(\"{obj_col}\" AS VARCHAR) AS object_id, "
+                f"{obj_expr} AS object_id, "
                 f"EPOCH(\"{t_col}\") AS t_epoch "
                 f"FROM \"{t_name}\" "
                 f"WHERE \"{subject_col}\" IS NOT NULL "
@@ -357,13 +388,26 @@ def materialize_remote(
                 t_col = tp
                 break
         subject_col = id_cols[0]
+        subj_type = subject_col.replace("ID_CD_", "")
         for obj_col in id_cols[1:]:
-            pred_name = f"HAS_{obj_col.replace('ID_CD_', '')}_VIA_{t_name}"
+            obj_type = obj_col.replace("ID_CD_", "")
+            pred_name = f"HAS_{obj_type}_VIA_{t_name}"
+
+            if subj_type in INSTANCE_TYPES:
+                subj_expr = f"source_db || '/' || '{subject_col}_' || CAST(\"{subject_col}\" AS VARCHAR)"
+            else:
+                subj_expr = f"'{subject_col}_' || CAST(\"{subject_col}\" AS VARCHAR)"
+
+            if obj_type in INSTANCE_TYPES:
+                obj_expr = f"source_db || '/' || '{obj_col}_' || CAST(\"{obj_col}\" AS VARCHAR)"
+            else:
+                obj_expr = f"'{obj_col}_' || CAST(\"{obj_col}\" AS VARCHAR)"
+
             selects.append(
                 f"SELECT "
-                f"'{subject_col}_' || CAST(\"{subject_col}\" AS VARCHAR) AS subject_id, "
+                f"{subj_expr} AS subject_id, "
                 f"'{pred_name}' AS predicate, "
-                f"'{obj_col}_' || CAST(\"{obj_col}\" AS VARCHAR) AS object_id, "
+                f"{obj_expr} AS object_id, "
                 f"EPOCH(\"{t_col}\") AS t_epoch "
                 f"FROM \"{t_name}\" "
                 f"WHERE \"{subject_col}\" IS NOT NULL "
@@ -409,13 +453,7 @@ def materialize_remote(
     t1 = time.time()
 
     # Ontology tables: small reference tables with descriptive text columns
-    # Instance types that should NOT be Qwen-encoded
-    INSTANCE_TYPES = {
-        'PACIENTE', 'INTERNACAO', 'BENEFICIARIO', 'FATURA', 'PESSOA',
-        'ORCAMENTO', 'HOSPITAL', 'COOPERADO', 'EVOLUCAO', 'COTACAO',
-        'TERCEIRO', 'RELATORIO', 'AUDITORIA',
-    }
-
+    # Uses module-level INSTANCE_TYPES to filter out instance entities
     from collections import Counter as Ctr
     fk_usage = Ctr()
     for t in tables:

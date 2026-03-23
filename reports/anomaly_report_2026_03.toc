@@ -1,0 +1,47 @@
+\babel@toc {brazil}{}\relax 
+\contentsline {section}{\numberline {1}Sum\'{a}rio Executivo}{3}{section.1}%
+\contentsline {subsection}{\numberline {1.1}M\'{e}tricas Globais}{3}{subsection.1.1}%
+\contentsline {subsection}{\numberline {1.2}Anomalias por Sistema Hospitalar}{3}{subsection.1.2}%
+\contentsline {section}{\numberline {2}GHO-ABERTTA}{4}{section.2}%
+\contentsline {subsection}{\numberline {2.1}Tabela Resumo}{4}{subsection.2.1}%
+\contentsline {subsection}{\numberline {2.2}Fichas Detalhadas}{4}{subsection.2.2}%
+\contentsline {section}{\numberline {3}GHO-APUB}{8}{section.3}%
+\contentsline {subsection}{\numberline {3.1}Tabela Resumo}{8}{subsection.3.1}%
+\contentsline {subsection}{\numberline {3.2}Fichas Detalhadas}{8}{subsection.3.2}%
+\contentsline {section}{\numberline {4}GHO-ASFEB}{10}{section.4}%
+\contentsline {subsection}{\numberline {4.1}Tabela Resumo}{10}{subsection.4.1}%
+\contentsline {subsection}{\numberline {4.2}Fichas Detalhadas}{10}{subsection.4.2}%
+\contentsline {section}{\numberline {5}GHO-BRADESCO}{12}{section.5}%
+\contentsline {subsection}{\numberline {5.1}Tabela Resumo}{12}{subsection.5.1}%
+\contentsline {subsection}{\numberline {5.2}Fichas Detalhadas}{13}{subsection.5.2}%
+\contentsline {section}{\numberline {6}GHO-COPEL}{43}{section.6}%
+\contentsline {subsection}{\numberline {6.1}Tabela Resumo}{43}{subsection.6.1}%
+\contentsline {subsection}{\numberline {6.2}Fichas Detalhadas}{43}{subsection.6.2}%
+\contentsline {section}{\numberline {7}GHO-ICS}{45}{section.7}%
+\contentsline {subsection}{\numberline {7.1}Tabela Resumo}{45}{subsection.7.1}%
+\contentsline {subsection}{\numberline {7.2}Fichas Detalhadas}{45}{subsection.7.2}%
+\contentsline {section}{\numberline {8}GHO-IPASGO}{54}{section.8}%
+\contentsline {subsection}{\numberline {8.1}Tabela Resumo}{54}{subsection.8.1}%
+\contentsline {subsection}{\numberline {8.2}Fichas Detalhadas}{54}{subsection.8.2}%
+\contentsline {section}{\numberline {9}GHO-KLINI}{60}{section.9}%
+\contentsline {subsection}{\numberline {9.1}Tabela Resumo}{60}{subsection.9.1}%
+\contentsline {subsection}{\numberline {9.2}Fichas Detalhadas}{60}{subsection.9.2}%
+\contentsline {section}{\numberline {10}GHO-PETROBRAS}{61}{section.10}%
+\contentsline {subsection}{\numberline {10.1}Tabela Resumo}{61}{subsection.10.1}%
+\contentsline {subsection}{\numberline {10.2}Fichas Detalhadas}{61}{subsection.10.2}%
+\contentsline {section}{\numberline {11}GHO-POSTAL}{69}{section.11}%
+\contentsline {subsection}{\numberline {11.1}Tabela Resumo}{69}{subsection.11.1}%
+\contentsline {subsection}{\numberline {11.2}Fichas Detalhadas}{69}{subsection.11.2}%
+\contentsline {section}{\numberline {12}GHO-REALGRANDEZA}{75}{section.12}%
+\contentsline {subsection}{\numberline {12.1}Tabela Resumo}{75}{subsection.12.1}%
+\contentsline {subsection}{\numberline {12.2}Fichas Detalhadas}{75}{subsection.12.2}%
+\contentsline {section}{\numberline {13}GHO-SAMI}{77}{section.13}%
+\contentsline {subsection}{\numberline {13.1}Tabela Resumo}{77}{subsection.13.1}%
+\contentsline {subsection}{\numberline {13.2}Fichas Detalhadas}{77}{subsection.13.2}%
+\contentsline {section}{\numberline {14}GOHOSP-CNU}{78}{section.14}%
+\contentsline {subsection}{\numberline {14.1}Tabela Resumo}{78}{subsection.14.1}%
+\contentsline {subsection}{\numberline {14.2}Fichas Detalhadas}{78}{subsection.14.2}%
+\contentsline {section}{\numberline {15}PASA}{79}{section.15}%
+\contentsline {subsection}{\numberline {15.1}Tabela Resumo}{79}{subsection.15.1}%
+\contentsline {subsection}{\numberline {15.2}Fichas Detalhadas}{79}{subsection.15.2}%
+\contentsline {section}{Ap\^{e}ndice: Metodologia}{81}{subsection.15.2}%
