@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 """
-Modal script: JCUBE V4 Anomaly Report Generator (v2 — Explained)
-Runs on Modal, loads 8.4GB V4 embeddings from jepa-cache volume,
-queries DuckDB from jcube-data volume, generates LaTeX → PDF.
+Modal script: JCUBE V5 Anomaly Report Generator
+Runs on Modal, loads 8.4GB V5 embeddings from jepa-cache volume,
+queries DuckDB from jcube-data volume, generates LaTeX -> PDF.
 
-New in v2:
-  - "Justificativa da Anomalia" per anomaly with:
-    * Hospital baseline comparison (LOS, billing, procedures, exams, glosa rate)
-    * 5 most similar admissions comparison
-    * Top deviating embedding dimensions mapped to feature importance
-    * Concrete DuckDB facts
-    * Natural language audit justification
+Key features (V5):
+  - AI interpretation paragraph per anomaly in plain Portuguese
+  - Hospital-specific baseline comparisons (not just global)
+  - Severity classification: CRITICO / ALTO / MODERADO with criteria
+  - Specific recommendation per anomaly based on deviation type
+  - Similar admissions show whether they are also anomalous
+  - Includes open admissions (EM CURSO) with COALESCE for LOS
+  - One anomaly card per page (no mid-card breaks)
+  - All text in pt-BR, UTF-8, no LaTeX accent commands
 
 Usage:
     modal run reports/modal_anomaly_report.py
@@ -24,7 +26,7 @@ import modal
 # Modal App + Volumes
 # ─────────────────────────────────────────────────────────────────
 
-app = modal.App("jcube-anomaly-report")
+app = modal.App("jcube-anomaly-report-v5")
 
 jepa_cache = modal.Volume.from_name("jepa-cache", create_if_missing=False)
 data_vol   = modal.Volume.from_name("jcube-data",  create_if_missing=False)
@@ -61,27 +63,14 @@ report_image = (
 # ─────────────────────────────────────────────────────────────────
 
 GRAPH_PARQUET  = "/data/jcube_graph.parquet"
-WEIGHTS_PATH   = "/cache/tkg-fullscale/node_embeddings.pt"
+WEIGHTS_PATH   = "/cache/tkg-v5/node_emb_epoch_1.pt"
 DB_PATH        = "/data/aggregated_fixed_union.db"
 OUTPUT_DIR     = "/data/reports"
-OUTPUT_PDF     = f"{OUTPUT_DIR}/anomaly_report_v4_explained_2026_03.pdf"
+OUTPUT_PDF     = f"{OUTPUT_DIR}/anomaly_report_v5_2026_03.pdf"
 
 REPORT_DATE_STR = "2026-03-23"
 START_DATE_STR  = "2026-02-21"
 Z_THRESHOLD     = 2.0
-
-# ─────────────────────────────────────────────────────────────────
-# Feature importance mapping for embedding dimensions
-# ─────────────────────────────────────────────────────────────────
-
-DIM_MEANING = {
-    16: "padr\u00e3o de faturamento",
-    28: "complexidade cl\u00ednica",
-    30: "volume de procedimentos",
-    46: "trajet\u00f3ria temporal",
-    53: "risco de glosa",
-    61: "padr\u00e3o operacional",
-}
 
 # ─────────────────────────────────────────────────────────────────
 # Helpers (all run inside container)
@@ -89,7 +78,7 @@ DIM_MEANING = {
 
 def _fmt_date(d) -> str:
     if d is None:
-        return "\u2014"
+        return "---"
     try:
         if isinstance(d, str):
             return d[:10]
@@ -110,24 +99,16 @@ def _safe_float(v, default=0.0) -> float:
         return default
 
 def _escape_latex(s: str) -> str:
-    """Escape LaTeX special characters while preserving UTF-8 accents.
-
-    The document uses \\usepackage[utf8]{inputenc} so ç, ã, é, etc.
-    pass through directly. We only escape structural LaTeX metacharacters.
-    """
+    """Escape LaTeX special characters while preserving UTF-8 accents."""
     if not s:
         return ""
     s = str(s)
-    # Order matters: backslash first, then the rest
     s = s.replace("\\", "\\textbackslash{}")
     s = s.replace("&",  "\\&")
     s = s.replace("%",  "\\%")
     s = s.replace("$",  "\\$")
     s = s.replace("#",  "\\#")
     s = s.replace("_",  "\\_")
-    # Do NOT escape { } ~ ^ — these corrupt UTF-8 accented text
-    # like "internação" → "interna\\{}c{c}\\{}~{a}o"
-    # Instead, only escape literal braces that aren't part of LaTeX commands
     s = s.replace("\r\n", " ")
     s = s.replace("\n",   " ")
     s = s.replace("\r",   " ")
@@ -141,25 +122,10 @@ def _brl(v) -> str:
     return "R\\$ {:,.2f}".format(f).replace(",", "X").replace(".", ",").replace("X", ".")
 
 def _brl_plain(v) -> str:
-    """BRL without LaTeX escapes — for use in f-strings that will be escaped later."""
     f = _safe_float(v)
     if f == 0:
         return "---"
     return "R$ {:,.2f}".format(f).replace(",", "X").replace(".", ",").replace("X", ".")
-
-def _z_color(z: float) -> str:
-    if z >= 5:
-        return "anomred"
-    elif z >= 3:
-        return "anomorange"
-    return "anomyellow"
-
-def _z_label(z: float) -> str:
-    if z >= 5:
-        return "CR\\'{I}TICO"
-    elif z >= 3:
-        return "ALTO"
-    return "MODERADO"
 
 def _truncate(s: str, max_len: int = 200) -> str:
     if not s:
@@ -170,7 +136,6 @@ def _truncate(s: str, max_len: int = 200) -> str:
     return s
 
 def _pct_diff(val, baseline) -> str:
-    """Return formatted '+X%' or '-X%' deviation from baseline."""
     if baseline == 0:
         return "N/A"
     diff = ((val - baseline) / baseline) * 100
@@ -178,15 +143,29 @@ def _pct_diff(val, baseline) -> str:
     return f"{sign}{diff:.0f}\\%"
 
 def _mult(val, baseline) -> str:
-    """Return 'Xx' multiplier string."""
     if baseline == 0:
         return "N/A"
     m = val / baseline
     return f"{m:.1f}x"
 
+def _severity_color(z: float, vl_total: float = 0, is_obito: bool = False) -> str:
+    """CRITICO: z>5 OR billing>500k OR obito.  ALTO: z>3.  MODERADO: z>2."""
+    if z >= 5 or vl_total >= 500_000 or is_obito:
+        return "anomred"
+    elif z >= 3:
+        return "anomorange"
+    return "anomyellow"
+
+def _severity_label(z: float, vl_total: float = 0, is_obito: bool = False) -> str:
+    if z >= 5 or vl_total >= 500_000 or is_obito:
+        return "CRITICO"
+    elif z >= 3:
+        return "ALTO"
+    return "MODERADO"
+
 
 # ─────────────────────────────────────────────────────────────────
-# Step 1 – Load twin (V4: source_db-prefixed node IDs)
+# Step 1 -- Load twin (V5: source_db-prefixed node IDs)
 # ─────────────────────────────────────────────────────────────────
 
 def _load_twin():
@@ -208,7 +187,7 @@ def _load_twin():
     n_nodes = len(unique_nodes)
     print(f"    {n_nodes:,} unique nodes in {time.time()-t0:.1f}s")
 
-    print("[1/6] Loading V4 embedding weights ...")
+    print("[1/6] Loading V5 embedding weights ...")
     t1 = time.time()
     state = torch.load(WEIGHTS_PATH, map_location="cpu", weights_only=True)
     if isinstance(state, torch.Tensor):
@@ -236,7 +215,7 @@ def _load_twin():
 
 
 # ─────────────────────────────────────────────────────────────────
-# Step 2 – Anomaly detection via Z-score
+# Step 2 -- Anomaly detection via Z-score
 # ─────────────────────────────────────────────────────────────────
 
 def _detect_anomalies(embeddings, internacao_mask, unique_nodes):
@@ -254,6 +233,17 @@ def _detect_anomalies(embeddings, internacao_mask, unique_nodes):
     mean_d = dists.mean()
     std_d  = dists.std()
     z_scores = (dists - mean_d) / (std_d + 1e-9)
+
+    # Build global z_score map for ALL internacoes (needed to mark similars as anomalous)
+    global_z_map = {}
+    for i, name in enumerate(names):
+        s = str(name)
+        try:
+            src_db, id_part = s.split("/", 1)
+            iid = int(id_part.split("ID_CD_INTERNACAO_")[1])
+            global_z_map[(src_db, iid)] = float(z_scores[i])
+        except Exception:
+            pass
 
     anomaly_mask  = z_scores > Z_THRESHOLD
     anomaly_names = names[anomaly_mask]
@@ -276,53 +266,11 @@ def _detect_anomalies(embeddings, internacao_mask, unique_nodes):
         except Exception:
             internacao_records.append((None, None))
 
-    return internacao_records, anomaly_z, centroid, vecs, names
+    return internacao_records, anomaly_z, centroid, vecs, names, global_z_map
 
 
 # ─────────────────────────────────────────────────────────────────
-# Step 3 – Per-anomaly embedding dimension analysis
-# ─────────────────────────────────────────────────────────────────
-
-def _analyze_embedding_dimensions(embeddings, node_to_idx, internacao_mask,
-                                   unique_nodes, records: list[tuple]) -> dict:
-    """
-    For each anomaly, find which embedding dimensions deviate most from the
-    internacao centroid. Returns dict keyed by (src_db, iid).
-    """
-    import numpy as np
-
-    print("[3/6] Analyzing embedding dimension deviations ...")
-
-    int_vecs = embeddings[internacao_mask].astype(np.float32)
-    centroid = int_vecs.mean(axis=0)   # shape: (64,)
-    std_per_dim = int_vecs.std(axis=0).clip(min=1e-8)
-
-    dim_analysis = {}
-    for src_db, iid in records:
-        if src_db is None or iid is None:
-            dim_analysis[(src_db, iid)] = []
-            continue
-        key = f"{src_db}/ID_CD_INTERNACAO_{iid}"
-        if key not in node_to_idx:
-            dim_analysis[(src_db, iid)] = []
-            continue
-        idx_global = node_to_idx[key]
-        vec = embeddings[idx_global].astype(np.float32)
-        # z-score per dimension
-        dim_z = (vec - centroid) / std_per_dim
-        # top 3 most deviating dimensions (by |z|)
-        top_dims = np.argsort(-np.abs(dim_z))[:6]
-        result = []
-        for d in top_dims:
-            meaning = DIM_MEANING.get(int(d), f"dim{d}")
-            result.append((int(d), float(dim_z[d]), meaning))
-        dim_analysis[(src_db, iid)] = result
-
-    return dim_analysis
-
-
-# ─────────────────────────────────────────────────────────────────
-# Step 4 – Batch similar admissions via cosine similarity
+# Step 3 -- Batch similar admissions via cosine similarity
 # ─────────────────────────────────────────────────────────────────
 
 def _batch_find_similar(embeddings, node_to_idx, internacao_mask, unique_nodes,
@@ -368,7 +316,7 @@ def _batch_find_similar(embeddings, node_to_idx, internacao_mask, unique_nodes,
 
 
 # ─────────────────────────────────────────────────────────────────
-# Step 5 – DuckDB: Fetch full admission details + baselines
+# Step 4 -- DuckDB: Fetch full admission details + baselines
 # ─────────────────────────────────────────────────────────────────
 
 def _fetch_admission_details(records: list[tuple[str, int]], anomaly_z):
@@ -395,23 +343,19 @@ def _fetch_admission_details(records: list[tuple[str, int]], anomaly_z):
         vals  = ", ".join(f"('{src}', {iid})" for src, iid in batch)
         con.execute(f"INSERT INTO tmp_anomaly_ids VALUES {vals}")
 
-    # ── Core internacao ──
+    # Core internacao -- includes open admissions via COALESCE
     q_inter = f"""
     SELECT i.ID_CD_INTERNACAO, i.ID_CD_PACIENTE, i.source_db,
         i.DH_ADMISSAO_HOSP, i.DH_FINALIZACAO,
         i.DS_DESCRICAO, i.DS_HISTORICO, i.DS_MOTIVO,
         i.DS_CONDUTA_INTERNACAO, i.DS_DESCRICAO_EVOLUCAO,
-        CASE WHEN i.DH_FINALIZACAO IS NOT NULL
-            THEN DATEDIFF('day', i.DH_ADMISSAO_HOSP::DATE, i.DH_FINALIZACAO::DATE)
-            ELSE DATEDIFF('day', i.DH_ADMISSAO_HOSP::DATE, DATE '{REPORT_DATE_STR}')
-        END AS LOS_DIAS,
+        DATEDIFF('day', i.DH_ADMISSAO_HOSP::DATE,
+                 COALESCE(i.DH_FINALIZACAO, CURRENT_TIMESTAMP)::DATE) AS LOS_DIAS,
         i.NR_SENHA, i.NR_GUIA_AUTORIZACAO, i.ID_CD_HOSPITAL, i.IN_SITUACAO
     FROM agg_tb_capta_internacao_cain i
     JOIN tmp_anomaly_ids t
       ON i.ID_CD_INTERNACAO = t.iid
      AND i.source_db = t.source_db
-    WHERE i.DH_ADMISSAO_HOSP >= '{START_DATE_STR}'
-      AND i.DH_ADMISSAO_HOSP <= '{REPORT_DATE_STR}'
     ORDER BY i.source_db, i.ID_CD_INTERNACAO
     """
     cur        = con.execute(q_inter)
@@ -419,15 +363,14 @@ def _fetch_admission_details(records: list[tuple[str, int]], anomaly_z):
     inter_rows = cur.fetchall()
 
     if not inter_rows:
-        print("    No admissions in 30-day window -- querying most recent 2000 anomalies ...")
+        print("    No admissions found -- querying most recent 2000 anomalies ...")
         q_inter2 = f"""
         SELECT i.ID_CD_INTERNACAO, i.ID_CD_PACIENTE, i.source_db,
             i.DH_ADMISSAO_HOSP, i.DH_FINALIZACAO,
             i.DS_DESCRICAO, i.DS_HISTORICO, i.DS_MOTIVO,
             i.DS_CONDUTA_INTERNACAO, i.DS_DESCRICAO_EVOLUCAO,
-            CASE WHEN i.DH_FINALIZACAO IS NOT NULL
-                THEN DATEDIFF('day', i.DH_ADMISSAO_HOSP::DATE, i.DH_FINALIZACAO::DATE)
-                ELSE 0 END AS LOS_DIAS,
+            DATEDIFF('day', i.DH_ADMISSAO_HOSP::DATE,
+                     COALESCE(i.DH_FINALIZACAO, CURRENT_TIMESTAMP)::DATE) AS LOS_DIAS,
             i.NR_SENHA, i.NR_GUIA_AUTORIZACAO, i.ID_CD_HOSPITAL, i.IN_SITUACAO
         FROM agg_tb_capta_internacao_cain i
         JOIN tmp_anomaly_ids t
@@ -468,7 +411,7 @@ def _fetch_admission_details(records: list[tuple[str, int]], anomaly_z):
         cols = [d[0] for d in cur.description]
         return cols, cur.fetchall()
 
-    # ── Fatura ──
+    # -- Fatura --
     print("    Fetching billing ...")
     fat_cols, fat_rows = _exec("""
         SELECT f.ID_CD_INTERNACAO, f.source_db,
@@ -495,7 +438,7 @@ def _fetch_admission_details(records: list[tuple[str, int]], anomaly_z):
         dict(zip(fat_cols, r)) for r in fat_rows
     }
 
-    # ── Fatura itens ──
+    # -- Fatura itens --
     print("    Fetching fatura items ...")
     try:
         fit_cols, fit_rows = _exec("""
@@ -518,7 +461,7 @@ def _fetch_admission_details(records: list[tuple[str, int]], anomaly_z):
         print(f"    fatura_itens skipped: {e}")
         fit_map = {}
 
-    # ── Glosas ──
+    # -- Glosas --
     print("    Fetching glosas ...")
     glo_cols, glo_rows = _exec("""
         SELECT g.ID_CD_INTERNACAO, g.source_db,
@@ -537,7 +480,7 @@ def _fetch_admission_details(records: list[tuple[str, int]], anomaly_z):
         dict(zip(glo_cols, r)) for r in glo_rows
     }
 
-    # ── Negociacoes ──
+    # -- Negociacoes --
     print("    Fetching negotiations ...")
     try:
         neg_cols, neg_rows = _exec("""
@@ -559,7 +502,7 @@ def _fetch_admission_details(records: list[tuple[str, int]], anomaly_z):
         print(f"    negociacoes skipped: {e}")
         neg_map = {}
 
-    # ── CIDs ──
+    # -- CIDs --
     print("    Fetching CIDs ...")
     cid_cols, cid_rows = _exec("""
         SELECT c.ID_CD_INTERNACAO, c.source_db,
@@ -577,7 +520,7 @@ def _fetch_admission_details(records: list[tuple[str, int]], anomaly_z):
         dict(zip(cid_cols, r)) for r in cid_rows
     }
 
-    # ── Procedimentos ──
+    # -- Procedimentos --
     print("    Fetching procedures ...")
     try:
         proc_cols, proc_rows = _exec("""
@@ -598,7 +541,7 @@ def _fetch_admission_details(records: list[tuple[str, int]], anomaly_z):
         print(f"    procedimentos skipped: {e}")
         proc_map = {}
 
-    # ── Exames ──
+    # -- Exames --
     print("    Fetching exams ...")
     try:
         exam_cols, exam_rows = _exec("""
@@ -618,7 +561,7 @@ def _fetch_admission_details(records: list[tuple[str, int]], anomaly_z):
         print(f"    exames skipped: {e}")
         exam_map = {}
 
-    # ── RAH Auditoria ──
+    # -- RAH Auditoria --
     print("    Fetching audits ...")
     try:
         rah_cols, rah_rows = _exec("""
@@ -639,7 +582,7 @@ def _fetch_admission_details(records: list[tuple[str, int]], anomaly_z):
         print(f"    RAH skipped: {e}")
         rah_map = {}
 
-    # ── Evolucao clinica ──
+    # -- Evolucao clinica --
     print("    Fetching clinical evolution ...")
     try:
         evo_cols, evo_rows = _exec("""
@@ -660,7 +603,7 @@ def _fetch_admission_details(records: list[tuple[str, int]], anomaly_z):
         print(f"    evolucao skipped: {e}")
         evo_map = {}
 
-    # ── Eventos adversos ──
+    # -- Eventos adversos --
     ev_map: dict = {}
     try:
         ev_cols, ev_rows = _exec("""
@@ -679,7 +622,7 @@ def _fetch_admission_details(records: list[tuple[str, int]], anomaly_z):
     except Exception as e:
         print(f"    eventos_adversos skipped: {e}")
 
-    # ── OPME ──
+    # -- OPME --
     opme_map: dict = {}
     try:
         opme_cols, opme_rows = _exec("""
@@ -698,12 +641,34 @@ def _fetch_admission_details(records: list[tuple[str, int]], anomaly_z):
     except Exception as e:
         print(f"    OPME skipped: {e}")
 
-    # ── Readmissao (< 30 dias) ──
-    # Find patients who had a PRIOR discharge within 30 days before this admission
+    # -- Tipo de Alta --
+    print("    Fetching discharge types ...")
+    alta_map: dict = {}
+    try:
+        alta_cols, alta_rows = _exec("""
+            SELECT a.ID_CD_ALTA AS ID_CD_INTERNACAO, a.source_db,
+                a.FL_TIPO_ALTA
+            FROM agg_tb_orcamento_evo_alta_oral a
+            JOIN tmp_valid_ids t
+              ON a.ID_CD_ALTA = t.iid
+             AND a.source_db = t.source_db
+        """)
+        for r in alta_rows:
+            d = dict(zip(alta_cols, r))
+            k = (d["source_db"], d["ID_CD_INTERNACAO"])
+            ft = str(d.get("FL_TIPO_ALTA") or "ND")
+            # Keep most severe: OD > AC > HO > AA > ND
+            severity_order = {"OD": 4, "AC": 3, "HO": 2, "AA": 1, "ND": 0}
+            if k not in alta_map or severity_order.get(ft, 0) > severity_order.get(alta_map[k], 0):
+                alta_map[k] = ft
+    except Exception as e:
+        print(f"    tipo_alta skipped: {e}")
+
+    # -- Readmissao (< 30 dias) --
     print("    Fetching readmission data ...")
     readmission_set: set = set()
     try:
-        r30_cols, r30_rows = _exec(f"""
+        r30_cols, r30_rows = _exec("""
             WITH anomaly_adm AS (
                 SELECT i.ID_CD_INTERNACAO, i.ID_CD_PACIENTE, i.source_db,
                        i.DH_ADMISSAO_HOSP
@@ -734,7 +699,7 @@ def _fetch_admission_details(records: list[tuple[str, int]], anomaly_z):
     except Exception as e:
         print(f"    readmission check skipped: {e}")
 
-    # ── Hospital names ──
+    # -- Hospital names --
     hosp_map: dict = {}
     try:
         hosp_cols, hosp_rows = _exec(
@@ -748,11 +713,11 @@ def _fetch_admission_details(records: list[tuple[str, int]], anomaly_z):
     except Exception:
         pass
 
-    # ── Hospital-level baseline (per hospital_id + source_db) ──
+    # -- Hospital-level baseline (per source_db -- the hospital system) --
     print("    Computing hospital baselines ...")
     hospital_baseline: dict = {}
     try:
-        hb_cols, hb_rows = _exec(f"""
+        hb_cols, hb_rows = _exec("""
             WITH fat_agg AS (
                 SELECT f.ID_CD_INTERNACAO, f.source_db,
                        SUM(f.VL_TOTAL) AS vl_total,
@@ -773,12 +738,10 @@ def _fetch_admission_details(records: list[tuple[str, int]], anomaly_z):
                 GROUP BY e.ID_CD_INTERNACAO, e.source_db
             )
             SELECT
-                i.ID_CD_HOSPITAL,
                 i.source_db,
                 COUNT(DISTINCT i.ID_CD_INTERNACAO)  AS n_internacoes,
-                AVG(CASE WHEN i.DH_FINALIZACAO IS NOT NULL
-                    THEN DATEDIFF('day', i.DH_ADMISSAO_HOSP::DATE, i.DH_FINALIZACAO::DATE)
-                    ELSE NULL END)                   AS avg_los,
+                AVG(DATEDIFF('day', i.DH_ADMISSAO_HOSP::DATE,
+                    COALESCE(i.DH_FINALIZACAO, CURRENT_TIMESTAMP)::DATE)) AS avg_los,
                 AVG(COALESCE(fa.vl_total, 0))        AS avg_billing,
                 AVG(COALESCE(fa.vl_glosa, 0))        AS avg_glosa,
                 AVG(COALESCE(pr.n_proc, 0))          AS avg_proc,
@@ -787,18 +750,15 @@ def _fetch_admission_details(records: list[tuple[str, int]], anomaly_z):
             LEFT JOIN fat_agg  fa ON i.ID_CD_INTERNACAO = fa.ID_CD_INTERNACAO AND i.source_db = fa.source_db
             LEFT JOIN proc_agg pr ON i.ID_CD_INTERNACAO = pr.ID_CD_INTERNACAO AND i.source_db = pr.source_db
             LEFT JOIN exam_agg ex ON i.ID_CD_INTERNACAO = ex.ID_CD_INTERNACAO AND i.source_db = ex.source_db
-            WHERE i.DH_ADMISSAO_HOSP >= '{START_DATE_STR}'
-              AND i.DH_ADMISSAO_HOSP <= '{REPORT_DATE_STR}'
-            GROUP BY i.ID_CD_HOSPITAL, i.source_db
+            GROUP BY i.source_db
         """)
         for row in hb_rows:
             d = dict(zip(hb_cols, row))
-            k = (d["source_db"], d["ID_CD_HOSPITAL"])
-            hospital_baseline[k] = d
+            hospital_baseline[d["source_db"]] = d
     except Exception as e:
         print(f"    hospital baseline skipped: {e}")
 
-    # ── Merge enrichment ──
+    # -- Merge enrichment --
     for a in admissions:
         iid = a["ID_CD_INTERNACAO"]
         src = a.get("source_db", "")
@@ -815,12 +775,12 @@ def _fetch_admission_details(records: list[tuple[str, int]], anomaly_z):
         a["eventos_adversos"] = ev_map.get(k, {})
         a["opme"]             = opme_map.get(k, {})
         a["readmissao_30d"]   = k in readmission_set
+        a["tipo_alta"]        = alta_map.get(k, "ND")
         a["nm_hospital"]      = hosp_map.get(
             (src, a.get("ID_CD_HOSPITAL")),
-            f"Hospital \\#{a.get('ID_CD_HOSPITAL', '?')}"
+            f"Hospital {a.get('ID_CD_HOSPITAL', '?')}"
         )
-        hosp_key = (src, a.get("ID_CD_HOSPITAL"))
-        a["hospital_baseline"] = hospital_baseline.get(hosp_key, {})
+        a["hospital_baseline"] = hospital_baseline.get(src, {})
 
     con.close()
     print(f"    Done in {time.time()-t0:.1f}s -- {len(admissions)} admissions enriched")
@@ -828,15 +788,10 @@ def _fetch_admission_details(records: list[tuple[str, int]], anomaly_z):
 
 
 # ─────────────────────────────────────────────────────────────────
-# Step 5b – Fetch DuckDB details for similar admissions
+# Step 4b -- Fetch DuckDB details for similar admissions
 # ─────────────────────────────────────────────────────────────────
 
 def _fetch_similar_details(similar_map: dict) -> dict:
-    """
-    For each set of similar admissions, fetch their LOS + billing from DuckDB
-    to enable direct comparison in the justification section.
-    Returns dict: (name_str) -> {"los": N, "vl_total": X, "source_db": ..., "iid": ...}
-    """
     import duckdb
 
     print("    Fetching details for similar admissions ...")
@@ -869,14 +824,13 @@ def _fetch_similar_details(similar_map: dict) -> dict:
             vals  = ", ".join(f"('{src}', {iid})" for src, iid in batch)
             con.execute(f"INSERT INTO tmp_sim_ids VALUES {vals}")
 
-        cur = con.execute(f"""
+        cur = con.execute("""
             SELECT i.ID_CD_INTERNACAO, i.source_db,
-                CASE WHEN i.DH_FINALIZACAO IS NOT NULL
-                    THEN DATEDIFF('day', i.DH_ADMISSAO_HOSP::DATE, i.DH_FINALIZACAO::DATE)
-                    ELSE DATEDIFF('day', i.DH_ADMISSAO_HOSP::DATE, DATE '{REPORT_DATE_STR}')
-                END AS los_dias,
+                DATEDIFF('day', i.DH_ADMISSAO_HOSP::DATE,
+                         COALESCE(i.DH_FINALIZACAO, CURRENT_TIMESTAMP)::DATE) AS los_dias,
                 COALESCE(f.vl_total, 0) AS vl_total,
-                COALESCE(p.n_proc, 0)   AS n_proc
+                COALESCE(p.n_proc, 0)   AS n_proc,
+                CASE WHEN i.DH_FINALIZACAO IS NULL THEN 1 ELSE 0 END AS em_curso
             FROM agg_tb_capta_internacao_cain i
             JOIN tmp_sim_ids t
               ON i.ID_CD_INTERNACAO = t.iid AND i.source_db = t.source_db
@@ -907,261 +861,158 @@ def _fetch_similar_details(similar_map: dict) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────
-# Step 6 – Generate LaTeX
+# AI interpretation builder
 # ─────────────────────────────────────────────────────────────────
 
-def _build_justification(a: dict, similar_map: dict, similar_details: dict,
-                          dim_analysis: dict) -> list[str]:
+def _build_interpretation(a: dict) -> str:
     """
-    Build the LaTeX content for the 'Justificativa da Anomalia' section.
-    Returns a list of LaTeX lines.
+    Build a 2-3 sentence AI interpretation paragraph in plain Portuguese
+    explaining WHY this admission is anomalous in business terms.
     """
-    iid = a["ID_CD_INTERNACAO"]
-    src = a.get("source_db", "")
-    z   = a["Z_SCORE"]
-
+    iid      = a["ID_CD_INTERNACAO"]
+    src      = a.get("source_db", "")
+    z        = a["Z_SCORE"]
+    los      = _safe_int(a.get("LOS_DIAS", 0))
     fat      = a.get("fatura", {})
     glo      = a.get("glosa", {})
-    neg      = a.get("negociacoes", {})
     proc     = a.get("procedimentos", {})
     exam     = a.get("exames", {})
     evo      = a.get("evolucao", {})
     baseline = a.get("hospital_baseline", {})
+    readmit  = a.get("readmissao_30d", False)
+    em_curso = a.get("DH_FINALIZACAO") is None or str(a.get("DH_FINALIZACAO", "")).strip() in ("", "None", "NaT")
 
     vl_total   = _safe_float(fat.get("vl_total"))
-    vl_glosa   = _safe_float(glo.get("vl_glosado_total")) or _safe_float(fat.get("vl_glosa_total"))
     n_proc     = _safe_int(proc.get("n_procedimentos"))
     n_exam     = _safe_int(exam.get("n_exames"))
-    n_neg      = _safe_int(neg.get("n_negociacoes"))
     n_evo      = _safe_int(evo.get("n_evolucoes"))
-    los        = _safe_int(a.get("LOS_DIAS", 0))
-    readmit    = a.get("readmissao_30d", False)
+    vl_glosa   = _safe_float(glo.get("vl_glosado_total")) or _safe_float(fat.get("vl_glosa_total"))
 
     avg_los    = _safe_float(baseline.get("avg_los"))
     avg_bill   = _safe_float(baseline.get("avg_billing"))
-    avg_glosa  = _safe_float(baseline.get("avg_glosa"))
     avg_proc   = _safe_float(baseline.get("avg_proc"))
     avg_exam   = _safe_float(baseline.get("avg_exam"))
 
-    L: list[str] = []
+    parts = []
 
-    # ── Natural language summary (Justificativa) ──
-    summary_parts = []
-    if avg_bill > 0 and vl_total > 0:
-        mult = vl_total / avg_bill
-        summary_parts.append(
-            f"faturamento de {_brl_plain(vl_total)} ({mult:.1f}x a média de "
-            f"{_brl_plain(avg_bill)} do hospital)"
+    # Opening with the most striking deviation
+    if n_exam > 0 and avg_exam > 0 and n_exam / avg_exam > 5:
+        parts.append(
+            f"Esta internacao apresenta {n_exam} exames em {los} dias, "
+            f"enquanto a media do {src} e {avg_exam:.0f} exames por internacao. "
+            f"Isso sugere possivel acumulo retroativo de exames ou erro de vinculacao no sistema de origem."
         )
-    elif vl_total > 0:
-        summary_parts.append(f"faturamento de {_brl_plain(vl_total)}")
-
-    if avg_proc > 0 and n_proc > 0:
-        summary_parts.append(f"{n_proc} procedimentos (média do hospital: {avg_proc:.0f})")
-    elif n_proc > 0:
-        summary_parts.append(f"{n_proc} procedimentos")
-
-    if avg_los > 0 and los > 0:
-        summary_parts.append(f"LOS de {los} dias (média: {avg_los:.1f}d)")
-    elif los > 0:
-        summary_parts.append(f"LOS de {los} dias")
-
-    if avg_glosa > 0 and vl_glosa > 0:
-        glosa_rate     = (vl_glosa / vl_total * 100) if vl_total > 0 else 0
-        avg_glosa_rate = (avg_glosa / avg_bill * 100) if avg_bill > 0 else 0
-        summary_parts.append(
-            f"taxa de glosa de {glosa_rate:.0f}\\% "
-            f"(média: {avg_glosa_rate:.0f}\\%)"
+    elif vl_total > 0 and avg_bill > 0 and vl_total / avg_bill > 3:
+        parts.append(
+            f"Esta internacao tem faturamento de {_brl_plain(vl_total)}, "
+            f"correspondendo a {vl_total/avg_bill:.1f}x a media de {_brl_plain(avg_bill)} do {src}. "
+            f"O valor excepcionalmente elevado exige verificacao dos itens faturados."
         )
-    elif vl_glosa > 0:
-        glosa_rate = (vl_glosa / vl_total * 100) if vl_total > 0 else 0
-        summary_parts.append(f"taxa de glosa de {glosa_rate:.0f}\\%")
-
-    if n_evo > 0:
-        summary_parts.append(f"{n_evo} evoluções clínicas")
-
-    if readmit:
-        summary_parts.append("readmissão em menos de 30 dias")
-
-    # Embedding dimension deviation
-    dim_info = dim_analysis.get((src, iid), [])
-    top2_dims = dim_info[:2] if dim_info else []
-
-    # Build specific recommendation based on actual data deviations
-    recs = []
-    if avg_bill > 0 and vl_total > 0 and vl_total / avg_bill > 2.0:
-        recs.append(f"Verificar justificativa para faturamento {vl_total/avg_bill:.1f}x acima da média do hospital")
-    if avg_proc > 0 and n_proc > 0 and n_proc / avg_proc > 2.0:
-        recs.append(f"Auditar os {n_proc} procedimentos realizados (média do hospital: {avg_proc:.0f})")
-    if vl_total > 0 and vl_glosa > 0 and (vl_glosa / vl_total) > 0.10:
-        recs.append(f"Investigar taxa de glosa de {vl_glosa/vl_total*100:.0f}\\% — acima do aceitável")
-    if avg_los > 0 and los > 0 and los / avg_los > 2.0:
-        recs.append(f"Avaliar permanência de {los} dias (média: {avg_los:.0f}d) — possível ineficiência ou complicação")
-    if readmit:
-        recs.append("Investigar causa da readmissão em menos de 30 dias — possível alta prematura")
-    if n_evo == 0 and los > 3:
-        recs.append(f"Internação de {los} dias sem registros de evolução clínica — possível falha de documentação")
-    if n_proc == 0 and vl_total > 0:
-        recs.append("Faturamento sem procedimentos registrados — possível inconsistência no registro")
-    if not recs:
-        recs.append(f"Internação apresenta z-score={z:.2f}, indicando perfil atípico para o hospital")
-
-    if summary_parts:
-        joined = "; ".join(summary_parts) + "."
-        L.append(
-            r"\vspace{2pt}\begin{tcolorbox}[colback=yellow!5,colframe=anomorange,"
-            r"title={\textbf{Justificativa da Anomalia}},fonttitle=\bfseries\small,"
-            r"left=4pt,right=4pt,top=3pt,bottom=3pt]"
+    elif los > 0 and avg_los > 0 and los / avg_los > 3:
+        parts.append(
+            f"LOS de {los} dias vs media de {avg_los:.1f} dias no {src} "
+            f"({los/avg_los:.1f}x acima). "
+            f"A permanencia prolongada pode indicar complicacoes clinicas ou atraso na alta."
         )
-        L.append(r"{\small Esta internação apresenta: " + _escape_latex(joined) + r"}")
-        if readmit:
-            L.append(
-                r"\\\textcolor{anomred}{\textbf{Alerta:} Paciente readmitido em menos de 30 dias.}"
-            )
-        # Specific recommendations (not generic boilerplate)
-        L.append(r"\\\textbf{Recomendações específicas:}")
-        L.append(r"\begin{itemize}[nosep,leftmargin=12pt]")
-        for rec in recs:
-            L.append(r"\item {\small " + _escape_latex(rec) + r"}")
-        L.append(r"\end{itemize}")
-        L.append(r"\end{tcolorbox}")
+    elif n_proc > 0 and avg_proc > 0 and n_proc / avg_proc > 3:
+        parts.append(
+            f"Foram realizados {n_proc} procedimentos nesta internacao, "
+            f"contra uma media de {avg_proc:.0f} no {src}. "
+            f"O volume atipico demanda auditoria de pertinencia."
+        )
     else:
-        L.append(
-            r"\vspace{2pt}\begin{tcolorbox}[colback=yellow!5,colframe=anomorange,"
-            r"title={\textbf{Justificativa da Anomalia}}]"
+        parts.append(
+            f"Esta internacao no {src} apresenta um perfil atipico "
+            f"(z-score = {z:.2f}) no espaco de embeddings do gemeo digital, "
+            f"indicando desvio significativo dos padroes operacionais e clinicos habituais."
         )
-        L.append(r"\begin{itemize}[nosep,leftmargin=12pt]")
-        for rec in recs:
-            L.append(r"\item {\small " + _escape_latex(rec) + r"}")
-        L.append(r"\end{itemize}")
-        L.append(r"\end{tcolorbox}")
 
-    # ── Baseline comparison table ──
-    if avg_bill > 0 or avg_los > 0:
-        L.append(r"\vspace{4pt}{\footnotesize\textbf{Comparação com Baseline do Hospital:}}")
-        L.append(
-            r"\begin{center}\begin{tabular}{l r r r}"
-            r"\toprule"
-            r"\textbf{Métrica} & \textbf{Esta Intern.} & "
-            r"\textbf{Média Hospital} & \textbf{Desvio} \\"
-            r"\midrule"
+    # Secondary observations
+    secondary = []
+    if readmit:
+        secondary.append("O paciente foi readmitido em menos de 30 dias, sinalizando possivel falha na alta anterior.")
+    if em_curso:
+        secondary.append(f"A internacao esta em curso (sem data de finalizacao), com {los} dias decorridos.")
+    if vl_glosa > 0 and vl_total > 0 and (vl_glosa / vl_total) > 0.15:
+        secondary.append(
+            f"A taxa de glosa e de {vl_glosa/vl_total*100:.0f}%, acima do aceitavel, "
+            f"totalizando {_brl_plain(vl_glosa)} glosados."
         )
-        rows_bl = []
-        if avg_los > 0:
-            rows_bl.append((
-                "LOS",
-                f"{los}d",
-                f"{avg_los:.1f}d",
-                _pct_diff(los, avg_los),
-            ))
-        if avg_bill > 0:
-            rows_bl.append((
-                "Faturamento",
-                _brl(vl_total) if vl_total else "---",
-                _brl(avg_bill),
-                _pct_diff(vl_total, avg_bill) if vl_total else "---",
-            ))
-        if avg_proc > 0:
-            rows_bl.append((
-                "Procedimentos",
-                str(n_proc),
-                f"{avg_proc:.0f}",
-                _pct_diff(n_proc, avg_proc) if n_proc else "---",
-            ))
-        if avg_exam > 0:
-            rows_bl.append((
-                "Exames",
-                str(n_exam),
-                f"{avg_exam:.0f}",
-                _pct_diff(n_exam, avg_exam) if n_exam else "---",
-            ))
-        if avg_glosa > 0:
-            rows_bl.append((
-                "Glosas",
-                _brl(vl_glosa) if vl_glosa else "---",
-                _brl(avg_glosa),
-                _pct_diff(vl_glosa, avg_glosa) if vl_glosa else "---",
-            ))
-        for metric, this_val, avg_val, diff in rows_bl:
-            # Colour deviations red if above +50%
-            diff_colored = diff
-            if diff not in ("---", "N/A") and diff.startswith("+"):
-                try:
-                    pct_val = float(diff.replace("+", "").replace("\\%", "").replace("%", ""))
-                    if pct_val >= 100:
-                        diff_colored = r"\textcolor{anomred}{\textbf{" + diff + r"}}"
-                    elif pct_val >= 50:
-                        diff_colored = r"\textcolor{anomorange}{" + diff + r"}"
-                except Exception:
-                    pass
-            L.append(
-                _escape_latex(metric) + " & " + this_val + " & " +
-                avg_val + " & " + diff_colored + r" \\"
-            )
-        L.append(r"\bottomrule\end{tabular}\end{center}" + "\n")
+    if n_evo == 0 and los > 3:
+        secondary.append(f"Nao ha registros de evolucao clinica em {los} dias de internacao.")
 
-    # ── Similar admissions comparison ──
-    similar = similar_map.get((src, iid), [])
-    if similar:
-        L.append(r"\vspace{2pt}{\footnotesize\textbf{Internações Similares (cosine):}\\[2pt]}")
-        L.append(
-            r"\begin{tabular}{l r r r l}"
-            r"\toprule"
-            r"\textbf{Intern.} & \textbf{Simil.} & \textbf{LOS} & \textbf{Faturado} & \textbf{Status} \\"
-            r"\midrule"
-        )
-        for sname, ssim in similar:
-            sd = similar_details.get(sname, {})
-            s_los  = _safe_int(sd.get("los_dias"))
-            s_bill = _safe_float(sd.get("vl_total"))
-            # Simple label for node id
-            if "/ID_CD_INTERNACAO_" in sname:
-                try:
-                    s_src, s_id_part = sname.split("/", 1)
-                    s_raw_id = s_id_part.split("ID_CD_INTERNACAO_")[1]
-                    sid_label = f"\\#{s_raw_id} ({_escape_latex(s_src)})"
-                except Exception:
-                    sid_label = _escape_latex(sname[:30])
-            else:
-                sid_label = _escape_latex(sname[:30])
-            bill_str = _brl(s_bill) if s_bill else "---"
-            los_str  = f"{s_los}d" if s_los else "---"
-            L.append(
-                sid_label + " & " +
-                f"{ssim:.3f}" + " & " +
-                los_str + " & " +
-                bill_str + " & " +
-                r"normal \\"
-            )
-        # Comparison summary
-        valid_bills = [_safe_float(similar_details.get(n, {}).get("vl_total"))
-                       for n, _ in similar
-                       if _safe_float(similar_details.get(n, {}).get("vl_total")) > 0]
-        if valid_bills and vl_total > 0:
-            avg_sim_bill = sum(valid_bills) / len(valid_bills)
-            if vl_total > avg_sim_bill * 1.2:
-                comparison_note = (
-                    r"\multicolumn{5}{l}{\textcolor{anomred}{\small "
-                    r"$\rightarrow$ Esta internação é significativamente "
-                    r"mais cara que suas similares.}} \\"
-                )
-                L.append(comparison_note)
-        L.append(r"\bottomrule\end{tabular}" + "\n")
+    if secondary:
+        parts.append(" ".join(secondary))
 
-    # ── Top deviating embedding dimensions ──
-    if dim_info:
-        L.append(r"\vspace{2pt}{\footnotesize\textbf{Dimensões de embedding mais desviantes:} ")
-        dim_parts = []
-        for d, dz, meaning in dim_info[:4]:
-            sign = "+" if dz >= 0 else ""
-            dim_parts.append(f"dim[{d}] ({_escape_latex(meaning)}, z={sign}{dz:.1f})")
-        L.append(", ".join(dim_parts) + "}")
+    return " ".join(parts)
 
-    return L
 
+def _build_recommendation(a: dict) -> list[str]:
+    """
+    Generate specific recommendations based on what is anomalous.
+    """
+    fat      = a.get("fatura", {})
+    glo      = a.get("glosa", {})
+    proc     = a.get("procedimentos", {})
+    exam     = a.get("exames", {})
+    evo      = a.get("evolucao", {})
+    baseline = a.get("hospital_baseline", {})
+    readmit  = a.get("readmissao_30d", False)
+    los      = _safe_int(a.get("LOS_DIAS", 0))
+    z        = a["Z_SCORE"]
+    src      = a.get("source_db", "")
+
+    vl_total   = _safe_float(fat.get("vl_total"))
+    n_proc     = _safe_int(proc.get("n_procedimentos"))
+    n_exam     = _safe_int(exam.get("n_exames"))
+    n_evo      = _safe_int(evo.get("n_evolucoes"))
+    vl_glosa   = _safe_float(glo.get("vl_glosado_total")) or _safe_float(fat.get("vl_glosa_total"))
+
+    avg_los    = _safe_float(baseline.get("avg_los"))
+    avg_bill   = _safe_float(baseline.get("avg_billing"))
+    avg_proc   = _safe_float(baseline.get("avg_proc"))
+    avg_exam   = _safe_float(baseline.get("avg_exam"))
+
+    recs = []
+
+    if vl_total > 0 and avg_bill > 0 and vl_total / avg_bill > 2.0:
+        recs.append(f"Auditar itens faturados --- faturamento de {_brl_plain(vl_total)} e {vl_total/avg_bill:.1f}x a media do {src}")
+    elif vl_total >= 500_000:
+        recs.append(f"Auditar itens faturados --- faturamento excepcional de {_brl_plain(vl_total)}")
+
+    if los > 0 and avg_los > 0 and los / avg_los > 2.0:
+        recs.append(f"Verificar necessidade clinica de permanencia prolongada --- LOS de {los} dias vs media de {avg_los:.1f} dias")
+
+    if n_proc > 0 and avg_proc > 0 and n_proc / avg_proc > 2.0:
+        recs.append(f"Conferir pertinencia dos {n_proc} procedimentos realizados (media: {avg_proc:.0f})")
+
+    if n_exam > 0 and avg_exam > 0 and n_exam / avg_exam > 2.0:
+        recs.append(f"Validar os {n_exam} exames solicitados (media: {avg_exam:.0f})")
+
+    if vl_total > 0 and vl_glosa > 0 and (vl_glosa / vl_total) > 0.10:
+        recs.append(f"Investigar taxa de glosa de {vl_glosa/vl_total*100:.0f}\\% ({_brl_plain(vl_glosa)})")
+
+    if readmit:
+        recs.append("Avaliar qualidade da alta anterior --- readmissao em menos de 30 dias")
+
+    if n_evo == 0 and los > 3:
+        recs.append(f"Verificar documentacao --- {los} dias sem registros de evolucao clinica")
+
+    if n_proc == 0 and vl_total > 0:
+        recs.append("Reconciliar faturamento vs procedimentos --- nenhum procedimento registrado")
+
+    if not recs:
+        recs.append(f"Revisar internacao com z-score={z:.2f} --- perfil atipico para o {src}")
+
+    return recs
+
+
+# ─────────────────────────────────────────────────────────────────
+# Step 5 -- Generate LaTeX
+# ─────────────────────────────────────────────────────────────────
 
 def _generate_latex(admissions: list[dict], similar_map: dict,
-                    similar_details: dict, dim_analysis: dict) -> str:
+                    similar_details: dict, global_z_map: dict) -> str:
     import numpy as np
 
     sources: dict[str, list[dict]] = {}
@@ -1170,16 +1021,25 @@ def _generate_latex(admissions: list[dict], similar_map: dict,
         sources.setdefault(src, []).append(a)
 
     total_anomalies = len(admissions)
-    total_critical  = sum(1 for a in admissions if a["Z_SCORE"] >= 5)
-    total_high      = sum(1 for a in admissions if 3 <= a["Z_SCORE"] < 5)
-    total_moderate  = sum(1 for a in admissions if 2 <= a["Z_SCORE"] < 3)
+    total_critical  = sum(1 for a in admissions
+                          if _severity_label(a["Z_SCORE"],
+                                             _safe_float(a.get("fatura", {}).get("vl_total")),
+                                             a.get("tipo_alta") == "OD") == "CRITICO")
+    total_high      = sum(1 for a in admissions
+                          if _severity_label(a["Z_SCORE"],
+                                             _safe_float(a.get("fatura", {}).get("vl_total")),
+                                             a.get("tipo_alta") == "OD") == "ALTO")
+    total_moderate  = sum(1 for a in admissions
+                          if _severity_label(a["Z_SCORE"],
+                                             _safe_float(a.get("fatura", {}).get("vl_total")),
+                                             a.get("tipo_alta") == "OD") == "MODERADO")
     total_vl_glosa  = sum(_safe_float(a["glosa"].get("vl_glosado_total")) for a in admissions)
     total_vl_fatura = sum(_safe_float(a["fatura"].get("vl_total")) for a in admissions)
     avg_los = float(np.mean([_safe_float(a.get("LOS_DIAS", 0)) for a in admissions])) if admissions else 0.0
 
     L = []
 
-    # ── Preamble ──
+    # -- Preamble --
     L.append(r"""\documentclass[a4paper,10pt]{article}
 \usepackage[a4paper, top=2cm, bottom=2cm, left=1.8cm, right=1.8cm]{geometry}
 \usepackage[utf8]{inputenc}
@@ -1196,6 +1056,7 @@ def _generate_latex(admissions: list[dict], similar_map: dict,
 \usepackage{fancyhdr}
 \usepackage{titlesec}
 \usepackage{tcolorbox}
+\usepackage{needspace}
 \usepackage{hyperref}
 \usepackage{amsmath}
 \usepackage{microtype}
@@ -1209,22 +1070,26 @@ def _generate_latex(admissions: list[dict], similar_map: dict,
 \definecolor{lightgray}{RGB}{248,248,248}
 \definecolor{darkblue}{RGB}{0,50,100}
 \definecolor{lightblue}{RGB}{220,235,250}
+\definecolor{severityred}{RGB}{255,220,220}
+\definecolor{severityorange}{RGB}{255,240,210}
+\definecolor{severityyellow}{RGB}{255,255,220}
 
 \tcbuselibrary{skins,breakable}
 \newtcolorbox{anomalycard}[2][]{%
-  breakable, enhanced,
+  enhanced,
   colback=lightgray,
   colframe=#2,
   fonttitle=\bfseries\footnotesize,
   title={#1},
   left=5pt, right=5pt, top=4pt, bottom=4pt,
   boxrule=1.5pt,
-  before upper={\setlength{\parskip}{2pt}}
+  before upper={\setlength{\parskip}{2pt}},
+  before={\needspace{0.9\textheight}}
 }
 
 \pagestyle{fancy}
 \fancyhf{}
-\fancyhead[L]{\textcolor{jcubeblue}{\textbf{JCUBE Digital Twin}} \textcolor{jcubegray}{\small | Relatório de Anomalias --- V4 (Explicado)}}
+\fancyhead[L]{\textcolor{jcubeblue}{\textbf{JCUBE Digital Twin}} \textcolor{jcubegray}{\small | Relatorio de Anomalias --- V5}}
 \fancyhead[R]{\textcolor{jcubegray}{\small 23/03/2026}}
 \fancyfoot[C]{\textcolor{jcubegray}{\thepage}}
 \renewcommand{\headrulewidth}{0.4pt}
@@ -1233,47 +1098,50 @@ def _generate_latex(admissions: list[dict], similar_map: dict,
 \titleformat{\section}{\large\bfseries\color{jcubeblue}}{\thesection}{1em}{}[\titlerule]
 \titleformat{\subsection}{\normalsize\bfseries\color{darkblue}}{\thesubsection}{1em}{}
 
-\hypersetup{colorlinks=true,linkcolor=jcubeblue,pdftitle={JCUBE V4 Anomalias Explicadas}}
+\hypersetup{colorlinks=true,linkcolor=jcubeblue,pdftitle={JCUBE V5 Relatorio de Anomalias}}
 
 \begin{document}
 \setlength{\parindent}{0pt}
 \setlength{\parskip}{3pt}
 """)
 
-    # ── Title page ──
+    # -- Title page --
     L.append(r"""\begin{titlepage}
 \begin{center}
 \vspace*{1.5cm}
 {\Huge\bfseries\textcolor{jcubeblue}{JCUBE}}\\[0.2cm]
-{\large\textcolor{jcubegray}{Digital Twin Analytics Platform --- Modelo V4 (Relatório Explicado)}}\\[1.2cm]
+{\large\textcolor{jcubegray}{Digital Twin Analytics Platform --- Modelo V5}}\\[1.2cm]
 \begin{tcolorbox}[colback=jcubeblue,colframe=jcubeblue,coltext=white,width=0.92\textwidth,halign=center]
-{\LARGE\bfseries Relatório de Anomalias em Internações}\\[0.3cm]
-{\large Análise via Embeddings do Gêmeo Digital --- Graph-JEPA V4 (35,2M nós $\times$ 64 dim)}\\[0.2cm]
-{\normalsize Com Justificativa de Auditoria por Internação}
+{\LARGE\bfseries Relatorio de Anomalias em Internacoes}\\[0.3cm]
+{\large Analise via Embeddings do Gemeo Digital --- Graph-JEPA V5 (35,2M nos $\times$ 64 dim)}\\[0.2cm]
+{\normalsize Com Interpretacao de Negocio e Recomendacoes por Internacao}
 \end{tcolorbox}
 \vspace{0.8cm}
 """)
     L.append(
-        r"{\Large Período: \textbf{" + _escape_latex(START_DATE_STR) +
+        r"{\Large Periodo: \textbf{" + _escape_latex(START_DATE_STR) +
         r"} a \textbf{" + _escape_latex(REPORT_DATE_STR) + r"}}\\[0.4cm]"
     )
-    L.append(r"{\large Gerado em: \textbf{23 de março de 2026}}\\[1.5cm]")
+    L.append(r"{\large Gerado em: \textbf{23 de marco de 2026}}\\[1.5cm]")
 
     L.append(
         r"""\begin{tabular}{ccc}
 \begin{tcolorbox}[colback=anomred!10,colframe=anomred,width=3.8cm,halign=center,left=3pt,right=3pt]
 {\LARGE\bfseries\textcolor{anomred}{""" + str(total_critical) + r"""}}\\[2pt]
-{\small\textbf{CR\'ITICOS} (z$\geq$5)}
+{\small\textbf{CRITICOS}}\\
+{\scriptsize z$\geq$5 ou fat.$\geq$R\$500k ou obito}
 \end{tcolorbox}
 &
 \begin{tcolorbox}[colback=anomorange!10,colframe=anomorange,width=3.8cm,halign=center,left=3pt,right=3pt]
 {\LARGE\bfseries\textcolor{anomorange}{""" + str(total_high) + r"""}}\\[2pt]
-{\small\textbf{ALTOS} (3$\leq$z$<$5)}
+{\small\textbf{ALTOS}}\\
+{\scriptsize 3$\leq$z$<$5}
 \end{tcolorbox}
 &
 \begin{tcolorbox}[colback=anomyellow!10,colframe=anomyellow,width=3.8cm,halign=center,left=3pt,right=3pt]
 {\LARGE\bfseries\textcolor{anomyellow}{""" + str(total_moderate) + r"""}}\\[2pt]
-{\small\textbf{MODERADOS} (2$\leq$z$<$3)}
+{\small\textbf{MODERADOS}}\\
+{\scriptsize 2$\leq$z$<$3}
 \end{tcolorbox}
 \end{tabular}
 
@@ -1284,18 +1152,19 @@ def _generate_latex(admissions: list[dict], similar_map: dict,
     )
     if total_vl_fatura > 0:
         L.append(
-            r"LOS Médio: \textbf{" + f"{avg_los:.1f}" +
+            r"LOS Medio: \textbf{" + f"{avg_los:.1f}" +
             r"} dias \quad | \quad Total Faturado: \textbf{" + _brl(total_vl_fatura) + r"}\\"
         )
     else:
-        L.append(r"LOS Médio: \textbf{" + f"{avg_los:.1f}" + r"} dias\\")
+        L.append(r"LOS Medio: \textbf{" + f"{avg_los:.1f}" + r"} dias\\")
     L.append(r"""\end{tcolorbox}
 
 \vfill
 {\small\textcolor{jcubegray}{
-Metodologia: Z-score sobre distância euclidiana ao centróide dos embeddings JEPA V4\\
-Limiar: z $>$ """ + str(Z_THRESHOLD) + r""" --- Modelo V4: 35.2M nós $\times$ 64 dim\\
-Cada anomalia inclui: Justificativa, Baseline do Hospital, Similares, Dimensões de Embedding
+Metodologia: Z-score sobre distancia euclidiana ao centroide dos embeddings JEPA V5\\
+Classificacao: CRITICO (z$\geq$5 ou faturamento$\geq$R\$500k ou obito),
+ALTO (3$\leq$z$<$5), MODERADO (2$\leq$z$<$3)\\
+Cada anomalia inclui: Interpretacao de Negocio, Baseline do Hospital, Similares, Recomendacoes
 }}
 \end{center}
 \end{titlepage}
@@ -1303,31 +1172,35 @@ Cada anomalia inclui: Justificativa, Baseline do Hospital, Similares, Dimensões
 
     L.append(r"\tableofcontents\clearpage")
 
-    # ── Executive Summary ──
-    L.append(r"\section{Sumário Executivo}")
+    # -- Executive Summary --
+    L.append(r"\section{Sumario Executivo}")
     L.append(
         r"""
-Este relatório apresenta \textbf{todas as internações anômalas} detectadas pelo
-\textit{Digital Twin} JCUBE no período de \textbf{""" +
+Este relatorio apresenta \textbf{todas as internacoes anomalas} detectadas pelo
+\textit{Digital Twin} JCUBE no periodo de \textbf{""" +
         _escape_latex(START_DATE_STR) + r"""} a \textbf{""" +
-        _escape_latex(REPORT_DATE_STR) + r"""}.
+        _escape_latex(REPORT_DATE_STR) + r"""}, incluindo internacoes em curso.
 
-Para cada anomalia, o relatório inclui uma \textbf{Justificativa de Auditoria} baseada em:
-comparação com o baseline do hospital, internações semanticamente similares,
-análise das dimensões de embedding mais desviantes e dados concretos do DuckDB.
+Para cada anomalia, o relatorio inclui:
+\begin{itemize}[nosep]
+  \item \textbf{Interpretacao de Negocio}: paragrafo em linguagem natural explicando POR QUE esta internacao e anomala
+  \item \textbf{Comparacao com Baseline}: metricas desta internacao vs media do hospital
+  \item \textbf{Internacoes Similares}: admissoes mais parecidas no espaco de embeddings, indicando se tambem sao anomalas
+  \item \textbf{Recomendacoes Especificas}: acoes concretas de auditoria baseadas nos desvios identificados
+\end{itemize}
 
-\subsection{Métricas Globais}
+\subsection{Metricas Globais}
 \begin{center}
 \begin{tabular}{lr}
 \toprule
-\textbf{Métrica} & \textbf{Valor} \\
+\textbf{Metrica} & \textbf{Valor} \\
 \midrule
 Total de anomalias detectadas & """ + str(total_anomalies) + r""" \\
 Sistemas hospitalares (fontes) & """ + str(len(sources)) + r""" \\
-Críticos (z $\geq$ 5) & \textcolor{anomred}{\textbf{""" + str(total_critical) + r"""}} \\
-Altos (3 $\leq$ z $<$ 5) & \textcolor{anomorange}{\textbf{""" + str(total_high) + r"""}} \\
-Moderados (2 $\leq$ z $<$ 3) & \textcolor{anomyellow}{\textbf{""" + str(total_moderate) + r"""}} \\
-LOS médio das anomalias & """ + f"{avg_los:.1f}" + r""" dias \\
+Criticos & \textcolor{anomred}{\textbf{""" + str(total_critical) + r"""}} \\
+Altos & \textcolor{anomorange}{\textbf{""" + str(total_high) + r"""}} \\
+Moderados & \textcolor{anomyellow}{\textbf{""" + str(total_moderate) + r"""}} \\
+LOS medio das anomalias & """ + f"{avg_los:.1f}" + r""" dias \\
 """
     )
     if total_vl_fatura > 0:
@@ -1344,7 +1217,7 @@ LOS médio das anomalias & """ + f"{avg_los:.1f}" + r""" dias \\
     L.append(r"""\begin{center}
 \begin{longtable}{lrrrr}
 \toprule
-\textbf{Sistema / Fonte} & \textbf{Total} & \textbf{Crít.} & \textbf{Alto} & \textbf{LOS Méd.} \\
+\textbf{Sistema / Fonte} & \textbf{Total} & \textbf{Crit.} & \textbf{Alto} & \textbf{LOS Med.} \\
 \midrule
 \endhead
 \bottomrule
@@ -1353,8 +1226,12 @@ LOS médio das anomalias & """ + f"{avg_los:.1f}" + r""" dias \\
     for src in sorted(sources.keys()):
         alist  = sources[src]
         n      = len(alist)
-        nc     = sum(1 for a in alist if a["Z_SCORE"] >= 5)
-        nh     = sum(1 for a in alist if 3 <= a["Z_SCORE"] < 5)
+        nc     = sum(1 for a in alist if _severity_label(
+            a["Z_SCORE"], _safe_float(a.get("fatura", {}).get("vl_total")),
+            a.get("tipo_alta") == "OD") == "CRITICO")
+        nh     = sum(1 for a in alist if _severity_label(
+            a["Z_SCORE"], _safe_float(a.get("fatura", {}).get("vl_total")),
+            a.get("tipo_alta") == "OD") == "ALTO")
         avg_l  = float(np.mean([_safe_float(a.get("LOS_DIAS", 0)) for a in alist]))
         L.append(
             _escape_latex(src) + r" & " + str(n) +
@@ -1365,19 +1242,22 @@ LOS médio das anomalias & """ + f"{avg_los:.1f}" + r""" dias \\
     L.append(r"\end{longtable}\end{center}" + "\n\n")
     L.append(r"\clearpage")
 
-    # ── Per-source sections ──
+    # -- Per-source sections --
     for src in sorted(sources.keys()):
         alist         = sorted(sources[src], key=lambda a: -a["Z_SCORE"])
         section_label = _escape_latex(src)
         L.append(r"\section{" + section_label + r"}")
 
         n         = len(alist)
-        nc        = sum(1 for a in alist if a["Z_SCORE"] >= 5)
-        nh        = sum(1 for a in alist if 3 <= a["Z_SCORE"] < 5)
-        nm        = sum(1 for a in alist if 2 <= a["Z_SCORE"] < 3)
+        nc        = sum(1 for a in alist if _severity_label(
+            a["Z_SCORE"], _safe_float(a.get("fatura", {}).get("vl_total")),
+            a.get("tipo_alta") == "OD") == "CRITICO")
+        nh        = sum(1 for a in alist if _severity_label(
+            a["Z_SCORE"], _safe_float(a.get("fatura", {}).get("vl_total")),
+            a.get("tipo_alta") == "OD") == "ALTO")
+        nm        = n - nc - nh
         avg_l     = float(np.mean([_safe_float(a.get("LOS_DIAS", 0)) for a in alist]))
         max_z     = max((a["Z_SCORE"] for a in alist), default=0.0)
-        vl_glo    = sum(_safe_float(a["glosa"].get("vl_glosado_total")) for a in alist)
         vl_fat    = sum(_safe_float(a["fatura"].get("vl_total")) for a in alist)
 
         L.append(
@@ -1385,17 +1265,15 @@ LOS médio das anomalias & """ + f"{avg_los:.1f}" + r""" dias \\
             section_label + r"""}}]
 \begin{tabular}{ll@{\quad}ll@{\quad}ll}
 Total: \textbf{""" + str(n) + r"""} &
-Crít.: \textcolor{anomred}{\textbf{""" + str(nc) + r"""}} &
+Crit.: \textcolor{anomred}{\textbf{""" + str(nc) + r"""}} &
 Altos: \textcolor{anomorange}{\textbf{""" + str(nh) + r"""}} &
 Mod.: \textcolor{anomyellow}{\textbf{""" + str(nm) + r"""}} &
-LOS méd.: \textbf{""" + f"{avg_l:.1f}" + r"""d} &
+LOS med.: \textbf{""" + f"{avg_l:.1f}" + r"""d} &
 Maior z: \textbf{""" + f"{max_z:.2f}" + r"""} \\
 """
         )
         if vl_fat > 0:
-            L.append(r"\multicolumn{2}{l}{Total faturado: \textbf{" + _brl(vl_fat) + r"}} & ")
-        if vl_glo > 0:
-            L.append(r"\multicolumn{2}{l}{\textcolor{anomred}{Total glosado: \textbf{" + _brl(vl_glo) + r"}}} & & \\")
+            L.append(r"\multicolumn{6}{l}{Total faturado: \textbf{" + _brl(vl_fat) + r"}} \\")
         L.append(r"""
 \end{tabular}
 \end{tcolorbox}
@@ -1404,9 +1282,9 @@ Maior z: \textbf{""" + f"{max_z:.2f}" + r"""} \\
         # Summary table
         L.append(r"\subsection{Tabela Resumo}")
         L.append(r"""\begin{center}
-\begin{longtable}{>{\scriptsize}r>{\scriptsize}r>{\scriptsize}c>{\scriptsize}c>{\scriptsize}r>{\scriptsize}r>{\scriptsize}r>{\scriptsize}r}
+\begin{longtable}{>{\scriptsize}r>{\scriptsize}r>{\scriptsize}c>{\scriptsize}c>{\scriptsize}r>{\scriptsize}r>{\scriptsize}r>{\scriptsize}l}
 \toprule
-\textbf{Intern.} & \textbf{Pac.} & \textbf{Admissão} & \textbf{Alta} & \textbf{LOS} & \textbf{Z} & \textbf{Faturado} & \textbf{Glosado} \\
+\textbf{Intern.} & \textbf{Pac.} & \textbf{Admissao} & \textbf{Alta} & \textbf{LOS} & \textbf{Z} & \textbf{Faturado} & \textbf{Severidade} \\
 \midrule
 \endhead
 \bottomrule
@@ -1416,21 +1294,24 @@ Maior z: \textbf{""" + f"{max_z:.2f}" + r"""} \\
             iid   = a["ID_CD_INTERNACAO"]
             pid   = a.get("ID_CD_PACIENTE", "?")
             adm   = _fmt_date(a.get("DH_ADMISSAO_HOSP"))
-            alta  = _fmt_date(a.get("DH_FINALIZACAO"))
+            alta_r = a.get("DH_FINALIZACAO")
+            is_open = alta_r is None or str(alta_r).strip() in ("", "None", "NaT")
+            alta  = r"\textcolor{anomorange}{EC}" if is_open else _fmt_date(alta_r)
             los   = _safe_int(a.get("LOS_DIAS", 0))
             z     = a["Z_SCORE"]
             vl_f  = _safe_float(a["fatura"].get("vl_total"))
-            vl_g  = _safe_float(a["glosa"].get("vl_glosado_total"))
-            color = _z_color(z)
+            is_ob = a.get("tipo_alta") == "OD"
+            color = _severity_color(z, vl_f, is_ob)
+            sev   = _severity_label(z, vl_f, is_ob)
             vl_f_str = _brl(vl_f) if vl_f > 0 else "---"
-            vl_g_str = r"\textcolor{anomred}{" + _brl(vl_g) + r"}" if vl_g > 0 else "---"
             L.append(
                 f"\\textcolor{{{color}}}{{\\textbf{{{iid}}}}} & {pid} & {adm} & {alta} & {los}d & "
-                f"\\textcolor{{{color}}}{{{z:.2f}}} & {vl_f_str} & {vl_g_str}" + r" \\" + "\n"
+                f"\\textcolor{{{color}}}{{{z:.2f}}} & {vl_f_str} & "
+                f"\\textcolor{{{color}}}{{\\textbf{{{sev}}}}}" + r" \\" + "\n"
             )
         L.append(r"\end{longtable}\end{center}" + "\n")
 
-        # Detailed cards
+        # Detailed cards -- one per page
         L.append(r"\subsection{Fichas Detalhadas}")
         for a in alist:
             iid      = a["ID_CD_INTERNACAO"]
@@ -1438,29 +1319,34 @@ Maior z: \textbf{""" + f"{max_z:.2f}" + r"""} \\
             z        = a["Z_SCORE"]
             los      = _safe_int(a.get("LOS_DIAS", 0))
             adm      = _fmt_date(a.get("DH_ADMISSAO_HOSP"))
-            alta     = _fmt_date(a.get("DH_FINALIZACAO"))
-            color    = _z_color(z)
-            severity = _z_label(z)
+            alta_raw = a.get("DH_FINALIZACAO")
+            em_curso = alta_raw is None or str(alta_raw).strip() in ("", "None", "NaT")
+            alta     = r"\textcolor{anomorange}{\textbf{EM CURSO}}" if em_curso else _fmt_date(alta_raw)
+            los_str  = str(los) + r"d \textcolor{anomorange}{$\circlearrowleft$}" if em_curso else str(los) + "d"
+            vl_f     = _safe_float(a["fatura"].get("vl_total"))
+            is_ob    = a.get("tipo_alta") == "OD"
+            color    = _severity_color(z, vl_f, is_ob)
+            severity = _severity_label(z, vl_f, is_ob)
             nm_hosp  = _escape_latex(str(a.get("nm_hospital") or "---"))
             senha    = _escape_latex(str(a.get("NR_SENHA") or "---"))
             guia     = _escape_latex(str(a.get("NR_GUIA_AUTORIZACAO") or "---"))
             readmit  = a.get("readmissao_30d", False)
-            readmit_flag = r"\textcolor{anomred}{\textbf{SIM}}" if readmit else "N\u00e3o"
+            readmit_flag = r"\textcolor{anomred}{\textbf{SIM}}" if readmit else "Nao"
 
             card_title = (
-                f"Internação \\#{iid} | {section_label} | "
+                f"Internacao {iid} | {section_label} | "
                 f"{severity} (z={z:.2f})"
             )
             L.append(r"\begin{anomalycard}[" + card_title + r"]{" + color + r"}")
 
             # Header: Patient, dates, hospital
             L.append(
-                r"\textbf{Dados da Internação:} " +
-                r"Paciente \#" + str(pid) +
-                r" $\mid$ Admissão: " + adm +
+                r"\textbf{Dados da Internacao:} " +
+                r"Paciente " + str(pid) +
+                r" $\mid$ Admissao: " + adm +
                 r" $\mid$ Alta: " + alta +
-                r" $\mid$ LOS: \textbf{" + str(los) + r"d}" +
-                r" $\mid$ Readmissão {<}30d: " + readmit_flag + r"\\"
+                r" $\mid$ LOS: \textbf{" + los_str + r"}" +
+                r" $\mid$ Readmissao 30d: " + readmit_flag + r"\\"
             )
             L.append(
                 r"\textbf{Hospital:} " + nm_hosp +
@@ -1480,77 +1366,212 @@ Maior z: \textbf{""" + f"{max_z:.2f}" + r"""} \\
                     L.append(r"\textbf{CIDs:} {\scriptsize " + all_cids + r"}\\" + "\n")
 
             for label, field, maxl in [
-                ("Diagn.\óstico", "DS_DESCRICAO", 180),
-                ("Hist\órico",    "DS_HISTORICO", 180),
-                ("Motivo",            "DS_MOTIVO",    130),
+                ("Diagnostico", "DS_DESCRICAO", 180),
+                ("Historico",   "DS_HISTORICO", 180),
+                ("Motivo",      "DS_MOTIVO",    130),
             ]:
                 val = _truncate(str(a.get(field) or ""), maxl)
                 if val and val != "---":
                     L.append(r"\textbf{" + label + r":} {\scriptsize " + _escape_latex(val) + r"}\\" + "\n")
 
-            # ── Justificativa da Anomalia (new section) ──
-            just_lines = _build_justification(a, similar_map, similar_details, dim_analysis)
-            L.extend(just_lines)
+            # ===== AI INTERPRETATION (new in V5) =====
+            interp_text = _build_interpretation(a)
+            L.append(
+                r"\vspace{2pt}\begin{tcolorbox}[colback=severityred!20,colframe=" + color + r","
+                r"title={\textbf{Interpretacao de Negocio}},fonttitle=\bfseries\small,"
+                r"left=4pt,right=4pt,top=3pt,bottom=3pt]"
+            )
+            L.append(r"{\small " + _escape_latex(interp_text) + r"}")
+            L.append(r"\end{tcolorbox}")
+
+            # ===== SPECIFIC RECOMMENDATIONS (new in V5) =====
+            recs = _build_recommendation(a)
+            L.append(
+                r"\begin{tcolorbox}[colback=severityyellow!30,colframe=anomorange,"
+                r"title={\textbf{Recomendacoes Especificas}},fonttitle=\bfseries\small,"
+                r"left=4pt,right=4pt,top=3pt,bottom=3pt]"
+            )
+            L.append(r"\begin{enumerate}[nosep,leftmargin=16pt]")
+            for rec in recs:
+                L.append(r"\item {\small " + _escape_latex(rec) + r"}")
+            L.append(r"\end{enumerate}")
+            L.append(r"\end{tcolorbox}")
+
+            # ===== BASELINE COMPARISON =====
+            baseline = a.get("hospital_baseline", {})
+            avg_los_b  = _safe_float(baseline.get("avg_los"))
+            avg_bill_b = _safe_float(baseline.get("avg_billing"))
+            avg_proc_b = _safe_float(baseline.get("avg_proc"))
+            avg_exam_b = _safe_float(baseline.get("avg_exam"))
+            avg_glosa_b = _safe_float(baseline.get("avg_glosa"))
+
+            fat      = a.get("fatura", {})
+            glo      = a.get("glosa", {})
+            proc_d   = a.get("procedimentos", {})
+            exam_d   = a.get("exames", {})
+            vl_total_a = _safe_float(fat.get("vl_total"))
+            vl_glosa_a = _safe_float(glo.get("vl_glosado_total")) or _safe_float(fat.get("vl_glosa_total"))
+            n_proc_a   = _safe_int(proc_d.get("n_procedimentos"))
+            n_exam_a   = _safe_int(exam_d.get("n_exames"))
+
+            if avg_bill_b > 0 or avg_los_b > 0:
+                L.append(r"\vspace{4pt}{\footnotesize\textbf{Comparacao com Baseline do " + _escape_latex(src) + r":}}")
+                L.append(
+                    r"\begin{center}\begin{tabular}{l r r r}"
+                    r"\toprule"
+                    r"\textbf{Metrica} & \textbf{Esta Intern.} & "
+                    r"\textbf{Media " + _escape_latex(src) + r"} & \textbf{Desvio} \\"
+                    r"\midrule"
+                )
+                rows_bl = []
+                if avg_los_b > 0:
+                    rows_bl.append(("LOS", f"{los}d", f"{avg_los_b:.1f}d", _pct_diff(los, avg_los_b)))
+                if avg_bill_b > 0:
+                    rows_bl.append(("Faturamento", _brl(vl_total_a) if vl_total_a else "---", _brl(avg_bill_b), _pct_diff(vl_total_a, avg_bill_b) if vl_total_a else "---"))
+                if avg_proc_b > 0:
+                    rows_bl.append(("Procedimentos", str(n_proc_a), f"{avg_proc_b:.0f}", _pct_diff(n_proc_a, avg_proc_b) if n_proc_a else "---"))
+                if avg_exam_b > 0:
+                    rows_bl.append(("Exames", str(n_exam_a), f"{avg_exam_b:.0f}", _pct_diff(n_exam_a, avg_exam_b) if n_exam_a else "---"))
+                if avg_glosa_b > 0:
+                    rows_bl.append(("Glosas", _brl(vl_glosa_a) if vl_glosa_a else "---", _brl(avg_glosa_b), _pct_diff(vl_glosa_a, avg_glosa_b) if vl_glosa_a else "---"))
+                for metric, this_val, avg_val, diff in rows_bl:
+                    diff_colored = diff
+                    if diff not in ("---", "N/A") and diff.startswith("+"):
+                        try:
+                            pct_val = float(diff.replace("+", "").replace("\\%", "").replace("%", ""))
+                            if pct_val >= 100:
+                                diff_colored = r"\textcolor{anomred}{\textbf{" + diff + r"}}"
+                            elif pct_val >= 50:
+                                diff_colored = r"\textcolor{anomorange}{" + diff + r"}"
+                        except Exception:
+                            pass
+                    L.append(
+                        _escape_latex(metric) + " & " + this_val + " & " +
+                        avg_val + " & " + diff_colored + r" \\"
+                    )
+                L.append(r"\bottomrule\end{tabular}\end{center}" + "\n")
+
+            # ===== SIMILAR ADMISSIONS (with anomaly status) =====
+            similar = similar_map.get((src, iid), [])
+            if similar:
+                L.append(r"\vspace{2pt}{\footnotesize\textbf{Internacoes Similares (cosine):}\\[2pt]}")
+                L.append(
+                    r"\begin{tabular}{l r r r l}"
+                    r"\toprule"
+                    r"\textbf{Intern.} & \textbf{Simil.} & \textbf{LOS} & \textbf{Faturado} & \textbf{Status} \\"
+                    r"\midrule"
+                )
+                for sname, ssim in similar:
+                    sd = similar_details.get(sname, {})
+                    s_los  = _safe_int(sd.get("los_dias"))
+                    s_bill = _safe_float(sd.get("vl_total"))
+                    s_em_curso = _safe_int(sd.get("em_curso", 0))
+                    # Check if this similar admission is also anomalous
+                    try:
+                        s_src, s_id_part = sname.split("/", 1)
+                        s_iid = int(s_id_part.split("ID_CD_INTERNACAO_")[1])
+                        s_z = global_z_map.get((s_src, s_iid), 0)
+                        sid_label = f"{s_iid} ({_escape_latex(s_src)})"
+                    except Exception:
+                        s_z = 0
+                        sid_label = _escape_latex(sname[:30])
+                    bill_str = _brl(s_bill) if s_bill else "---"
+                    los_str  = f"{s_los}d" if s_los else "---"
+                    if s_em_curso:
+                        los_str += " EC"
+                    # Status: anomalous or normal
+                    if s_z > Z_THRESHOLD:
+                        status_str = r"\textcolor{anomred}{\textbf{ANOMALA (z=" + f"{s_z:.1f}" + r")}}"
+                    else:
+                        status_str = r"\textcolor{jcubeblue}{normal}"
+                    L.append(
+                        sid_label + " & " +
+                        f"{ssim:.3f}" + " & " +
+                        los_str + " & " +
+                        bill_str + " & " +
+                        status_str + r" \\"
+                    )
+                # Pattern detection
+                n_anom_similar = sum(
+                    1 for sname, _ in similar
+                    if global_z_map.get(
+                        (sname.split("/", 1)[0],
+                         int(sname.split("ID_CD_INTERNACAO_")[1]) if "ID_CD_INTERNACAO_" in sname else 0),
+                        0
+                    ) > Z_THRESHOLD
+                )
+                if n_anom_similar >= 2:
+                    L.append(
+                        r"\multicolumn{5}{l}{\textcolor{anomred}{\small "
+                        r"$\rightarrow$ " + str(n_anom_similar) + r" das " + str(len(similar)) +
+                        r" similares tambem sao anomalas --- possivel padrao sistematico.}} \\"
+                    )
+                elif n_anom_similar == 0:
+                    L.append(
+                        r"\multicolumn{5}{l}{\textcolor{jcubeblue}{\small "
+                        r"$\rightarrow$ Nenhuma similar e anomala --- esta internacao e verdadeiramente atipica.}} \\"
+                    )
+                L.append(r"\bottomrule\end{tabular}" + "\n")
 
             # Financial details
-            fat = a.get("fatura", {})
-            glo = a.get("glosa", {})
-            neg = a.get("negociacoes", {})
-            if fat or glo or neg:
+            fat_d = a.get("fatura", {})
+            glo_d = a.get("glosa", {})
+            neg_d = a.get("negociacoes", {})
+            if fat_d or glo_d or neg_d:
                 L.append(r"\vspace{2pt}{\footnotesize\begin{tabular}{@{}ll@{\hspace{12pt}}ll@{\hspace{12pt}}ll@{}}" + "\n")
                 L.append(r"\toprule\multicolumn{6}{c}{\textbf{Dados Financeiros Detalhados}}\\\midrule" + "\n")
-                if fat:
+                if fat_d:
                     L.append(
-                        r"VL Total & " + _brl(fat.get("vl_total")) +
-                        r" & VL RH & " + _brl(fat.get("vl_rh")) +
-                        r" & VL Mat. & " + _brl(fat.get("vl_mat")) + r" \\" + "\n"
+                        r"VL Total & " + _brl(fat_d.get("vl_total")) +
+                        r" & VL RH & " + _brl(fat_d.get("vl_rh")) +
+                        r" & VL Mat. & " + _brl(fat_d.get("vl_mat")) + r" \\" + "\n"
                     )
                     L.append(
-                        r"VL Med. & " + _brl(fat.get("vl_med")) +
-                        r" & VL OPME & " + _brl(fat.get("vl_opme")) +
-                        r" & VL SADT & " + _brl(fat.get("vl_sadt")) + r" \\" + "\n"
+                        r"VL Med. & " + _brl(fat_d.get("vl_med")) +
+                        r" & VL OPME & " + _brl(fat_d.get("vl_opme")) +
+                        r" & VL SADT & " + _brl(fat_d.get("vl_sadt")) + r" \\" + "\n"
                     )
                     L.append(
-                        r"VL Líq. & " + _brl(fat.get("vl_liquido")) +
-                        r" & Glosa Fat. & \textcolor{anomred}{" + _brl(fat.get("vl_glosa_total")) + r"}" +
-                        r" & Diverg. & \textcolor{anomorange}{" + _brl(fat.get("vl_divergencia")) + r"}" +
+                        r"VL Liq. & " + _brl(fat_d.get("vl_liquido")) +
+                        r" & Glosa Fat. & \textcolor{anomred}{" + _brl(fat_d.get("vl_glosa_total")) + r"}" +
+                        r" & Diverg. & \textcolor{anomorange}{" + _brl(fat_d.get("vl_divergencia")) + r"}" +
                         r" \\" + "\n"
                     )
-                if glo:
+                if glo_d:
                     L.append(r"\midrule\multicolumn{6}{c}{\textbf{Glosas}}\\\midrule" + "\n")
                     L.append(
-                        r"N Glosas & \textbf{" + str(_safe_int(glo.get("n_glosas"))) + r"}" +
-                        r" & VL Glosado & \textcolor{anomred}{\textbf{" + _brl(glo.get("vl_glosado_total")) + r"}}" +
-                        r" & Aceito & " + _brl(glo.get("vl_aceito")) + r" \\" + "\n"
+                        r"N Glosas & \textbf{" + str(_safe_int(glo_d.get("n_glosas"))) + r"}" +
+                        r" & VL Glosado & \textcolor{anomred}{\textbf{" + _brl(glo_d.get("vl_glosado_total")) + r"}}" +
+                        r" & Aceito & " + _brl(glo_d.get("vl_aceito")) + r" \\" + "\n"
                     )
-                if neg:
-                    L.append(r"\midrule\multicolumn{6}{c}{\textbf{Negociações de Auditoria}}\\\midrule" + "\n")
-                    tipos = _escape_latex(_truncate(str(neg.get("tipos_negociacao") or ""), 60))
+                if neg_d:
+                    L.append(r"\midrule\multicolumn{6}{c}{\textbf{Negociacoes de Auditoria}}\\\midrule" + "\n")
+                    tipos = _escape_latex(_truncate(str(neg_d.get("tipos_negociacao") or ""), 60))
                     L.append(
-                        r"N Negoc. & \textbf{" + str(_safe_int(neg.get("n_negociacoes"))) + r"}" +
-                        r" & VL Negoc. & " + _brl(neg.get("vl_negociado_total")) +
+                        r"N Negoc. & \textbf{" + str(_safe_int(neg_d.get("n_negociacoes"))) + r"}" +
+                        r" & VL Negoc. & " + _brl(neg_d.get("vl_negociado_total")) +
                         r" & Tipos & {\scriptsize " + tipos + r"} \\" + "\n"
                     )
                 L.append(r"\bottomrule\end{tabular}}" + "\n")
 
             # Activity summary
-            proc = a.get("procedimentos", {})
-            fit  = a.get("fatura_itens", {})
-            evo  = a.get("evolucao", {})
-            aud  = a.get("auditoria", {})
-            ev   = a.get("eventos_adversos", {})
-            opme = a.get("opme", {})
-            exm  = a.get("exames", {})
+            proc_a = a.get("procedimentos", {})
+            fit_a  = a.get("fatura_itens", {})
+            evo_a  = a.get("evolucao", {})
+            aud_a  = a.get("auditoria", {})
+            ev_a   = a.get("eventos_adversos", {})
+            opme_a = a.get("opme", {})
+            exm_a  = a.get("exames", {})
 
             L.append(
                 r"\vspace{2pt}{\footnotesize " +
-                r"\textbf{Proced.:} " + str(_safe_int(proc.get("n_procedimentos"))) +
-                r"\quad\textbf{Exames:} " + str(_safe_int(exm.get("n_exames"))) +
-                r"\quad\textbf{Evoluções:} " + str(_safe_int(evo.get("n_evolucoes"))) +
-                r"\quad\textbf{Audit. RAH:} " + str(_safe_int(aud.get("n_auditorias"))) +
-                r"\quad\textbf{Eventos Adv.:} " + str(_safe_int(ev.get("n_eventos"))) +
-                r"\quad\textbf{Itens Fat.:} " + str(_safe_int(fit.get("n_itens"))) +
-                r"\quad\textbf{OPME:} " + str(_safe_int(opme.get("n_opme"))) +
+                r"\textbf{Proced.:} " + str(_safe_int(proc_a.get("n_procedimentos"))) +
+                r"\quad\textbf{Exames:} " + str(_safe_int(exm_a.get("n_exames"))) +
+                r"\quad\textbf{Evolucoes:} " + str(_safe_int(evo_a.get("n_evolucoes"))) +
+                r"\quad\textbf{Audit. RAH:} " + str(_safe_int(aud_a.get("n_auditorias"))) +
+                r"\quad\textbf{Eventos Adv.:} " + str(_safe_int(ev_a.get("n_eventos"))) +
+                r"\quad\textbf{Itens Fat.:} " + str(_safe_int(fit_a.get("n_itens"))) +
+                r"\quad\textbf{OPME:} " + str(_safe_int(opme_a.get("n_opme"))) +
                 r"}" + "\n"
             )
 
@@ -1559,50 +1580,40 @@ Maior z: \textbf{""" + f"{max_z:.2f}" + r"""} \\
 
         L.append(r"\clearpage")
 
-    # ── Appendix ──
-    L.append(r"\section*{Apêndice: Metodologia de Detecção e Justificação}")
-    L.append(r"\addcontentsline{toc}{section}{Apêndice: Metodologia}")
+    # -- Appendix --
+    L.append(r"\section*{Apendice: Metodologia de Deteccao e Interpretacao}")
+    L.append(r"\addcontentsline{toc}{section}{Apendice: Metodologia}")
     L.append(r"""
-\subsection*{1. Modelo Graph-JEPA V4}
-O modelo \textit{Graph-JEPA V4} foi treinado sobre o grafo de conhecimento JCUBE com \textbf{35,2M nós}
-e \textbf{64 dimensões} de embedding. Cada nó representa uma entidade (internação, paciente,
-fatura, médico, etc.) e as arestas representam relações entre elas.
+\subsection*{1. Modelo Graph-JEPA V5}
+O modelo \textit{Graph-JEPA V5} foi treinado sobre o grafo de conhecimento JCUBE com \textbf{35,2M nos}
+e \textbf{64 dimensoes} de embedding. Cada no representa uma entidade (internacao, paciente,
+fatura, medico, etc.) e as arestas representam relacoes entre elas.
 
-\subsection*{2. Detecção de Anomalias via Z-score}
-Para cada internação com nó no grafo:
+\subsection*{2. Deteccao de Anomalias via Z-score}
+Para cada internacao com no no grafo:
 \begin{enumerate}[nosep]
-  \item Calcula-se a \textbf{distância euclidiana} do embedding ao \textbf{centróide} de todas as internações.
-  \item Calcula-se o \textbf{z-score}: $z = \frac{d - \mu}{\sigma}$, onde $\mu$ e $\sigma$ são a média e desvio padrão das distâncias.
-  \item Internações com $z > """ + str(Z_THRESHOLD) + r"""$ são classificadas como anômalas.
+  \item Calcula-se a \textbf{distancia euclidiana} do embedding ao \textbf{centroide} de todas as internacoes.
+  \item Calcula-se o \textbf{z-score}: $z = \frac{d - \mu}{\sigma}$.
+  \item Internacoes com $z > """ + str(Z_THRESHOLD) + r"""$ sao classificadas como anomalas.
 \end{enumerate}
 
-\subsection*{3. Classificação de Severidade}
+\subsection*{3. Classificacao de Severidade}
 \begin{itemize}[nosep]
-  \item \textcolor{anomred}{\textbf{CR\'ITICO}}: z $\geq$ 5
+  \item \textcolor{anomred}{\textbf{CRITICO}}: z $\geq$ 5, ou faturamento $\geq$ R\$500.000, ou obito (OD)
   \item \textcolor{anomorange}{\textbf{ALTO}}: 3 $\leq$ z $<$ 5
   \item \textcolor{anomyellow}{\textbf{MODERADO}}: 2 $\leq$ z $<$ 3
 \end{itemize}
 
-\subsection*{4. Justificativa de Auditoria (Novo em V2)}
-Para cada anomalia, o relatório calcula:
+\subsection*{4. Interpretacao de Negocio (V5)}
+Para cada anomalia, o relatorio gera automaticamente:
 \begin{itemize}[nosep]
-  \item \textbf{Baseline do hospital}: média de LOS, faturamento, procedimentos, exames e glosas
-    para todas as internações do mesmo hospital no período.
-  \item \textbf{Internações similares}: as 5 internações com maior similaridade por cosseno
-    no espaço de embeddings, com seus LOS e faturamentos reais.
-  \item \textbf{Dimensões de embedding}: as dimensões que mais desviam do centróide,
-    mapeadas para seu significado funcional (faturamento, procedimentos, glosa, etc.).
-  \item \textbf{Readmissão}: se o paciente foi readmitido em menos de 30 dias.
-\end{itemize}
-
-\subsection*{5. Mapeamento de Dimensões de Embedding}
-\begin{itemize}[nosep]
-  \item dim[16]: padrão de faturamento
-  \item dim[28]: complexidade clínica
-  \item dim[30]: volume de procedimentos
-  \item dim[46]: trajetória temporal
-  \item dim[53]: risco de glosa
-  \item dim[61]: padrão operacional
+  \item \textbf{Paragrafo interpretativo}: explica em linguagem natural POR QUE a internacao e anomala,
+    comparando com o baseline do hospital (media de LOS, faturamento, procedimentos, exames).
+  \item \textbf{Status das similares}: indica se as internacoes mais semelhantes no espaco de embeddings
+    tambem sao anomalas (padrao sistematico) ou normais (caso verdadeiramente unico).
+  \item \textbf{Recomendacoes especificas}: acoes concretas de auditoria baseadas no tipo de desvio
+    (faturamento alto $\rightarrow$ auditar itens, LOS extremo $\rightarrow$ verificar necessidade clinica,
+    muitos procedimentos $\rightarrow$ conferir pertinencia, readmissao $\rightarrow$ avaliar alta anterior).
 \end{itemize}
 """)
     L.append(r"\end{document}")
@@ -1610,12 +1621,11 @@ Para cada anomalia, o relatório calcula:
 
 
 # ─────────────────────────────────────────────────────────────────
-# Step 7 – Compile LaTeX → PDF
+# Step 6 -- Compile LaTeX -> PDF
 # ─────────────────────────────────────────────────────────────────
 
 def _compile_latex(latex_content: str, output_pdf: str):
     import subprocess
-    import os
     from pathlib import Path
 
     print("[6/6] Compiling PDF ...")
@@ -1666,7 +1676,6 @@ def _compile_latex(latex_content: str, output_pdf: str):
 @app.function(
     image=report_image,
     volumes=VOLUMES,
-    # 8.4 GB embeddings + DuckDB queries -- use a memory-rich CPU instance
     cpu=8.0,
     memory=32768,   # 32 GB RAM
     timeout=3600,   # 1 hour max
@@ -1677,7 +1686,7 @@ def generate_report():
 
     t_start = time.time()
     print("=" * 70)
-    print("JCUBE V4 Anomaly Report Generator v2 (Modal) -- Explained")
+    print("JCUBE V5 Anomaly Report Generator (Modal)")
     print(f"Period : {START_DATE_STR} -> {REPORT_DATE_STR}")
     print(f"Weights: {WEIGHTS_PATH}")
     print(f"DB     : {DB_PATH}")
@@ -1685,7 +1694,6 @@ def generate_report():
     print(f"Z thr  : {Z_THRESHOLD}")
     print("=" * 70)
 
-    # Sanity check volumes are mounted
     for p in [GRAPH_PARQUET, WEIGHTS_PATH, DB_PATH]:
         if not os.path.exists(p):
             raise FileNotFoundError(f"Required file not found: {p}")
@@ -1693,21 +1701,16 @@ def generate_report():
     # 1. Load twin
     unique_nodes, embeddings, node_to_idx, internacao_mask = _load_twin()
 
-    # 2. Detect anomalies (returns centroid + vecs for later use)
-    records, anomaly_z, _centroid, _vecs, _names = _detect_anomalies(
+    # 2. Detect anomalies (returns global z-map for similar-admission marking)
+    records, anomaly_z, _centroid, _vecs, _names, global_z_map = _detect_anomalies(
         embeddings, internacao_mask, unique_nodes
     )
 
-    # 3. Analyze embedding dimensions per anomaly
-    dim_analysis = _analyze_embedding_dimensions(
-        embeddings, node_to_idx, internacao_mask, unique_nodes, records
-    )
-
-    # 4. Fetch DuckDB details + hospital baselines
+    # 3. Fetch DuckDB details + hospital baselines
     admissions, _hospital_baseline = _fetch_admission_details(records, anomaly_z)
     print(f"    Total admissions to report: {len(admissions)}")
 
-    # 5. Batch similar admissions lookup
+    # 4. Batch similar admissions lookup
     valid_records = [(a["source_db"], a["ID_CD_INTERNACAO"]) for a in admissions]
     print("[5/6] Computing similar admissions ...")
     similar_map = _batch_find_similar(
@@ -1715,14 +1718,14 @@ def generate_report():
         valid_records, k=5,
     )
 
-    # 5b. Fetch DuckDB details for similar admissions
+    # 4b. Fetch DuckDB details for similar admissions
     similar_details = _fetch_similar_details(similar_map)
 
-    # 6. Generate LaTeX
+    # 5. Generate LaTeX
     print("[5/6] Generating LaTeX document ...")
-    latex = _generate_latex(admissions, similar_map, similar_details, dim_analysis)
+    latex = _generate_latex(admissions, similar_map, similar_details, global_z_map)
 
-    # 7. Compile PDF
+    # 6. Compile PDF
     _compile_latex(latex, OUTPUT_PDF)
 
     # Commit volume so changes persist
@@ -1732,5 +1735,10 @@ def generate_report():
     print(f"\nFinished in {elapsed:.1f}s")
     print(f"Report saved to Modal volume jcube-data at: {OUTPUT_PDF}")
     print("Download with:")
-    print(f"  modal volume get jcube-data reports/anomaly_report_v4_explained_2026_03.pdf ./anomaly_report_v4_explained_2026_03.pdf")
+    print(f"  modal volume get jcube-data reports/anomaly_report_v5_2026_03.pdf ./anomaly_report_v5_2026_03.pdf")
     return OUTPUT_PDF
+
+
+@app.local_entrypoint()
+def main():
+    generate_report.remote()

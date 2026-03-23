@@ -50,16 +50,16 @@ except ImportError:
 class V5Config:
     """All hyperparameters centralized."""
 
-    # Dimensions
-    latent_dim: int = 128
-    time_dim: int = 32
-    edge_feat_dim: int = 160  # latent_dim + time_dim
+    # Dimensions — 64 for single A100, 128 for 4x A100 FSDP
+    latent_dim: int = 64
+    time_dim: int = 16
+    edge_feat_dim: int = 80  # latent_dim + time_dim
     rwse_dim: int = 16
     lappe_dim: int = 16
 
     # GraphGPS
-    gps_layers: int = 5
-    gps_heads: int = 8
+    gps_layers: int = 3  # 3 for single A100, 5 for 4x
+    gps_heads: int = 4
     gps_ffn_mult: int = 4
     gps_dropout: float = 0.1
 
@@ -67,8 +67,8 @@ class V5Config:
     gcn_bn: bool = True
 
     # TGN Memory
-    tgn_dim: int = 128
-    tgn_msg_dim: int = 128
+    tgn_dim: int = 64
+    tgn_msg_dim: int = 64
 
     # Training
     batch_size: int = 512
@@ -620,9 +620,8 @@ def _build_nn_modules():
             self.E = nn.Linear(edge_dim, dim, bias=False)
 
             self.bn_node = nn.BatchNorm1d(dim) if use_bn else nn.Identity()
-            self.bn_edge = nn.BatchNorm1d(dim) if use_bn else nn.Identity()
-
             self.edge_proj = nn.Linear(dim, edge_dim, bias=False) if dim != edge_dim else nn.Identity()
+            self.bn_edge = nn.BatchNorm1d(edge_dim) if use_bn else nn.Identity()
 
             self.dropout = nn.Dropout(dropout)
 
@@ -1958,7 +1957,7 @@ class V5Trainer:
             # Temporal info
             batch_node_time = batch.node_time.to(device) if hasattr(batch, 'node_time') else None
             batch_edge_time = batch.edge_time.to(device) if hasattr(batch, 'edge_time') else None
-            batch_vec = batch.batch.to(device) if hasattr(batch, 'batch') else None
+            batch_vec = batch.batch.to(device) if getattr(batch, 'batch', None) is not None else torch.zeros(x.shape[0], dtype=torch.long, device=device)
 
             # Online encoder
             ctx_repr = self.online_encoder(
@@ -2345,7 +2344,7 @@ def train_tkg_jepa_v5(
 
     print(f"Config: {cfg.to_json()}")
     print(f"CUDA: {torch.cuda.get_device_name(0)}")
-    print(f"VRAM: {torch.cuda.get_device_properties(0).total_mem / 1e9:.1f} GB")
+    print(f"VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
 
     # Build nn modules
     nn_modules = _build_nn_modules()
@@ -2461,3 +2460,4 @@ if __name__ == "__main__":
         materialize(catalog_path=args.catalog)
     else:
         print("Training requires Modal. Use: modal run event_jepa_cube/scale_pipeline_v5.py --action train")
+# v5-fix-1774275723
