@@ -43,7 +43,7 @@ def run_probes():
     data_volume.reload()
 
     GRAPH = "/data/jcube_graph.parquet"
-    WEIGHTS = "/cache/tkg-fullscale/node_emb_epoch_2.pt"
+    WEIGHTS = "/cache/tkg-v5/node_emb_epoch_1.pt"
     DB = "/data/aggregated_fixed_union.db"
 
     # Verify file size (V4 should be ~8.4GB = 35M×64×4 bytes)
@@ -475,3 +475,4 @@ def run_probes():
 def main():
     run_probes.remote()
 # V4 probe - 1774247977
+# epoch2-1774305118

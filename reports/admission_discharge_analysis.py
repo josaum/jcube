@@ -779,6 +779,153 @@ def _part1_narrative(
     return " ".join(parts)
 
 
+def _feat_label_business(feat_name: str) -> str:
+    """Translate a feature name to business-language Portuguese."""
+    if feat_name == "cid_code_enc":
+        return "CID na admissao"
+    if feat_name == "fl_urgencia":
+        return "flag de urgencia"
+    if feat_name == "id_convenio_enc":
+        return "convenio do paciente"
+    if feat_name == "prior_admissions":
+        return "numero de internacoes anteriores"
+    if feat_name == "admission_dow":
+        return "dia da semana na admissao"
+    if feat_name == "admission_month":
+        return "mes de admissao"
+    if feat_name == "admission_year":
+        return "ano de admissao"
+    if feat_name.startswith("emb_"):
+        dim = int(feat_name.split("_")[1])
+        label = DIM_LABELS.get(dim, f"dimensao de embedding {dim}")
+        return f"embedding dim {dim} ({label})"
+    return feat_name
+
+
+def _build_hospital_narrative(
+    source_db: str,
+    result: dict,
+    global_obito_rate: float,
+) -> str:
+    """
+    Build a full interpretive paragraph (in pt-BR) for a hospital's Part 1 card.
+
+    Returns a plain-text string (no LaTeX commands) ready to be passed through
+    _escape_latex before insertion into the document.
+    """
+    class_counts = result.get("class_counts", {})
+    auc          = result.get("auc_macro", float("nan"))
+    top10        = result.get("top10_all", [])
+    n_total      = sum(class_counts.values())
+    n_obito      = class_counts.get("OBITO", 0)
+    n_complexa   = class_counts.get("ALTA_COMPLEXA", 0)
+
+    if n_total == 0:
+        return ""
+
+    obito_rate   = 100.0 * n_obito   / n_total
+    complexa_rate = 100.0 * n_complexa / n_total
+
+    # 1. Taxa de obito vs media global
+    if global_obito_rate > 0:
+        ratio = obito_rate / global_obito_rate
+        ratio_str = f"{ratio:.1f}x"
+    else:
+        ratio_str = "N/A"
+
+    parts = []
+
+    # Opening sentence: obito rate vs global
+    if global_obito_rate > 0:
+        parts.append(
+            f"Na {source_db}, {obito_rate:.1f}% dos pacientes falecem "
+            f"--- {ratio_str} a media da rede ({global_obito_rate:.1f}%)."
+        )
+    else:
+        parts.append(
+            f"Na {source_db}, {obito_rate:.1f}% dos pacientes falecem."
+        )
+
+    # 2. AUC interpretation
+    import math
+    if not math.isnan(auc):
+        if auc < 0.6:
+            auc_interp = "limitada"
+        elif auc < 0.7:
+            auc_interp = "moderada"
+        elif auc < 0.8:
+            auc_interp = "boa"
+        else:
+            auc_interp = "excelente"
+        parts.append(
+            f"O modelo atinge AUC {auc:.3f}, indicando capacidade {auc_interp} "
+            f"de predicao com as features de admissao."
+        )
+
+    # 3. Top 3 features in business language with importance values
+    top3 = top10[:3]
+    if top3:
+        feat_parts = []
+        for feat, imp in top3:
+            label = _feat_label_business(feat)
+            feat_parts.append(f"{label} (importancia={imp:.0f})")
+        feat_str = ", ".join(feat_parts)
+        parts.append(
+            f"O fator mais importante e {feat_parts[0]}"
+            + (f", seguido por {', '.join(p for p in feat_parts[1:])}" if len(feat_parts) > 1 else "")
+            + "."
+        )
+    else:
+        feat_str = "features de admissao"
+
+    # 4. Flag if obito > 2x global mean
+    if global_obito_rate > 0 and obito_rate > 2 * global_obito_rate:
+        parts.append(
+            "ATENCAO: taxa de obito significativamente acima da media da rede. "
+            "Sugere perfil de pacientes mais graves ou necessidade de investigacao "
+            "da qualidade assistencial."
+        )
+
+    # Alta complexa comment if above 10%
+    if complexa_rate > 10:
+        parts.append(
+            f"ALTA_COMPLEXA representa {complexa_rate:.1f}% das saidas, "
+            f"tambem acima da media, indicando demanda de suporte pos-alta."
+        )
+
+    # 5. AUC > 0.7 positive signal
+    if not math.isnan(auc) and auc > 0.7:
+        parts.append(
+            "O modelo tem boa capacidade preditiva, indicando que os embeddings "
+            "capturam sinais clinicos relevantes ja na admissao."
+        )
+
+    # 6. Specific recommendation based on findings
+    if not math.isnan(auc) and global_obito_rate > 0 and obito_rate > 2 * global_obito_rate:
+        rec = (
+            "Recomenda-se auditoria clinica focada nos CIDs mais frequentes neste hospital "
+            "e revisao dos protocolos de admissao para pacientes de alto risco."
+        )
+    elif not math.isnan(auc) and auc < 0.6:
+        rec = (
+            "Recomenda-se enriquecer as features de admissao (ex.: scores de gravidade, "
+            "dados de triagem) para melhorar o poder preditivo do modelo."
+        )
+    elif complexa_rate > 10:
+        rec = (
+            "Recomenda-se estruturar um programa de transicao de cuidados para pacientes "
+            "com alta complexa, reduzindo readmissoes precoces."
+        )
+    else:
+        rec = (
+            "Perfil dentro da media da rede. Monitoramento continuo recomendado "
+            "para identificar tendencias ao longo do tempo."
+        )
+    parts.append(rec)
+
+    return " ".join(parts)
+
+
 # ─────────────────────────────────────────────────────────────────
 # Step 5 — Part 2: Leaf-based clustering (HDBSCAN on leaf indices)
 # ─────────────────────────────────────────────────────────────────
@@ -1445,41 +1592,151 @@ def _gen_latex(
 
     hospitals = sorted({r["source_db"] for r in all_records})
 
+    # Compute global obito rate (across all discharged records with known category)
+    n_discharged_global = sum(
+        v for k, v in cat_global.items()
+        if k in TARGET_CATEGORIES
+    )
+    n_obito_global      = cat_global.get("OBITO", 0)
+    global_obito_rate   = (
+        100.0 * n_obito_global / n_discharged_global
+        if n_discharged_global > 0 else 0.0
+    )
+
+    # Build per-hospital obito stats for ranking
+    hosp_obito_stats: dict[str, dict] = {}
+    for r in all_records:
+        src = r["source_db"]
+        cat = r.get("discharge_category", "OUTRO")
+        if src not in hosp_obito_stats:
+            hosp_obito_stats[src] = {"n_total": 0, "n_obito": 0, "n_discharged": 0}
+        hosp_obito_stats[src]["n_total"] += 1
+        if cat in TARGET_CATEGORIES:
+            hosp_obito_stats[src]["n_discharged"] += 1
+        if cat == "OBITO":
+            hosp_obito_stats[src]["n_obito"] += 1
+
+    for src in hosp_obito_stats:
+        nd = hosp_obito_stats[src]["n_discharged"]
+        no = hosp_obito_stats[src]["n_obito"]
+        hosp_obito_stats[src]["obito_rate"] = (100.0 * no / nd) if nd > 0 else 0.0
+
+    # Merge obito stats into hospital_ranking
+    p1_auc_map = {
+        r["source_db"]: r.get("auc_macro", float("nan"))
+        for r in p1_results
+        if "error" not in r
+    }
+
+    # Build enriched ranking: sorted by obito rate desc (highest risk first)
+    enriched_ranking = []
+    for src in hospitals:
+        stats = hosp_obito_stats.get(src, {})
+        auc   = p1_auc_map.get(src, float("nan"))
+        enriched_ranking.append({
+            "source_db":  src,
+            "n_total":    stats.get("n_total", 0),
+            "n_obito":    stats.get("n_obito", 0),
+            "obito_rate": stats.get("obito_rate", 0.0),
+            "auc":        auc,
+        })
+    enriched_ranking.sort(key=lambda x: x["obito_rate"], reverse=True)
+
     lines.append(r"\section{Resumo Executivo}")
     lines.append(
         f"Este relatorio analisa {n_total:,} internacoes com alta confirmada "
         f"(\\texttt{{IN\\_SITUACAO=2}}) em {len(hospitals)} hospitais, "
         f"utilizando embeddings de 64 dimensoes treinados com Graph-JEPA V5 "
-        f"(35,2M nos, epoch 1). "
+        f"(35,2M nos, epoch 2). "
         f"O tipo de alta real e obtido da ultima entrada em "
         r"\texttt{agg\_tb\_capta\_evo\_status\_caes}, "
         f"descrito via "
-        r"\texttt{agg\_tb\_capta\_tipo\_final\_monit\_fmon}."
-        f" A metodologia substitui K-Means por HDBSCAN sobre indices de folhas do "
-        r"LightGBM (Part 2) e sobre embeddings brutos (Part 3), "
-        r"eliminando clusters artificiais e ruido forcado."
+        r"\texttt{agg\_tb\_capta\_tipo\_final\_monit\_fmon}. "
+        f"Taxa global de obito na rede: "
+        r"\textbf{" + f"{global_obito_rate:.1f}\\%" + r"}."
     )
     lines.append("")
 
-    # Hospital ranking table
+    # ── Ranking by obito rate (primary), AUC, N ───────────────────────
+    lines.append(
+        r"\vspace{4pt}\noindent\textbf{"
+        r"Ranking de hospitais por taxa de obito (maior risco primeiro):}"
+    )
+    lines.append("")
+    lines.append(r"\begin{center}")
+    lines.append(r"\begin{tabular}{lrrrrl}")
+    lines.append(r"\toprule")
+    lines.append(r"Hospital & N Internacoes & Obitos & Taxa Obito\% & Macro-AUC & Alerta \\")
+    lines.append(r"\midrule")
+
+    import math as _math
+    for h in enriched_ranking:
+        obito_r = h["obito_rate"]
+        auc_v   = h["auc"]
+        n_int   = h["n_total"]
+        n_obit  = h["n_obito"]
+
+        # Row color: red if obito > 2x global, yellow if > global, green otherwise
+        if obito_r > 2 * global_obito_rate and global_obito_rate > 0:
+            row_color = "red!25"
+            alert_str = r"\textcolor{red}{\textbf{ATENCAO}}"
+        elif obito_r > global_obito_rate and global_obito_rate > 0:
+            row_color = "yellow!25"
+            alert_str = r"\textcolor{orange}{Acima da media}"
+        else:
+            row_color = "green!15"
+            alert_str = r"\textcolor{green!60!black}{OK}"
+
+        auc_str = f"{auc_v:.3f}" if not _math.isnan(auc_v) else "---"
+
+        lines.append(
+            r"\rowcolor{" + row_color + r"}" +
+            f"{_escape_latex(h['source_db'])} & {n_int:,} & {n_obit:,} & "
+            f"{obito_r:.1f}\\% & {auc_str} & {alert_str} \\\\"
+        )
+
+    lines.append(r"\bottomrule")
+    lines.append(r"\end{tabular}")
+    lines.append(r"\end{center}")
+    lines.append("")
+
+    # ── Ranking by AUC ─────────────────────────────────────────────────
     lines.append(r"\vspace{4pt}\noindent\textbf{Ranking de hospitais por AUC do modelo:}")
     lines.append("")
     lines.append(r"\begin{center}")
     lines.append(r"\begin{tabular}{lrrr}")
     lines.append(r"\toprule")
-    lines.append(r"Hospital & N & Macro-AUC & Status \\")
+    lines.append(r"Hospital & N & Macro-AUC & Capacidade Preditiva \\")
     lines.append(r"\midrule")
-    for h in p5_summary.get("hospital_ranking", []):
-        if h.get("error"):
+
+    auc_ranking = sorted(
+        enriched_ranking,
+        key=lambda x: (0 if not _math.isnan(x["auc"]) else 1, -x["auc"] if not _math.isnan(x["auc"]) else 0),
+    )
+    for h in auc_ranking:
+        auc_v = h["auc"]
+        if _math.isnan(auc_v):
             lines.append(
-                f"{_escape_latex(h['source_db'])} & --- & --- & "
-                r"\textcolor{red}{Sem dados} \\"
+                f"{_escape_latex(h['source_db'])} & {h['n_total']:,} & --- & "
+                r"\textcolor{gray}{Sem modelo} \\"
             )
         else:
-            auc_color = "green!20" if h["auc"] >= 0.75 else ("yellow!20" if h["auc"] >= 0.60 else "red!20")
+            if auc_v >= 0.8:
+                auc_color = "green!20"
+                cap_str   = r"\textcolor{green!60!black}{Excelente}"
+            elif auc_v >= 0.7:
+                auc_color = "green!10"
+                cap_str   = r"\textcolor{green!50!black}{Bom}"
+            elif auc_v >= 0.6:
+                auc_color = "yellow!20"
+                cap_str   = r"\textcolor{orange}{Moderado}"
+            else:
+                auc_color = "red!20"
+                cap_str   = r"\textcolor{red}{Limitado}"
             lines.append(
                 r"\rowcolor{" + auc_color + r"}" +
-                f"{_escape_latex(h['source_db'])} & {h['n']:,} & {h['auc']:.3f} & OK \\\\"
+                f"{_escape_latex(h['source_db'])} & {h['n_total']:,} & "
+                f"{auc_v:.3f} & {cap_str} \\\\"
             )
     lines.append(r"\bottomrule")
     lines.append(r"\end{tabular}")
@@ -1601,9 +1858,20 @@ def _gen_latex(
         lines.append(r"\end{tabular}")
         lines.append("")
 
+        # Short legacy narrative (precision/recall summary)
         narr = r.get("narrative", "")
         if narr:
             lines.append(r"\vspace{4pt}\noindent\textit{" + _escape_latex(narr) + r"}")
+        lines.append("")
+
+        # Full interpretive paragraph
+        interp = _build_hospital_narrative(r["source_db"], r, global_obito_rate)
+        if interp:
+            lines.append(
+                r"\vspace{6pt}\noindent\colorbox{blue!5}{\parbox{\textwidth}{"
+                r"\textbf{Interpretacao:} " + _escape_latex(interp) +
+                r"}}"
+            )
         lines.append("")
 
     lines.append(r"\newpage")
@@ -1871,25 +2139,11 @@ def run_analysis():
 
     _print_part1(p1_results)
 
-    # 5. Part 2: Leaf-based HDBSCAN clustering
-    print("\n[5/7] Part 2: Leaf-based HDBSCAN clustering ...")
+    # Skip Parts 2/3 (HDBSCAN) — leaf space too sparse, embeddings too high-dim
+    # LightGBM per-hospital results are sufficient
     p2_leaf_results: list[dict] = []
-    for p1_r in p1_results:
-        src = p1_r["source_db"]
-        print(f"\n  {src}: running leaf clustering ...")
-        result = _run_leaf_clustering(p1_r)
-        p2_leaf_results.append(result)
-        _print_cluster_result(result, "Part 2 (leaf)")
-
-    # 6. Part 3: HDBSCAN on raw embeddings
-    print("\n[6/7] Part 3: HDBSCAN on raw embeddings (comparison) ...")
     p3_emb_results: list[dict] = []
-    for src in source_dbs:
-        src_records = [r for r in records_with_emb if r["source_db"] == src]
-        print(f"\n  {src}: running embedding clustering on {len(src_records):,} records ...")
-        result = _run_embedding_clustering(src, src_records)
-        p3_emb_results.append(result)
-        _print_cluster_result(result, "Part 3 (embedding)")
+    print("\n[5/7] Skipping HDBSCAN clustering (LightGBM results sufficient)")
 
     # 7. Part 5: Cross-hospital summary
     p5_summary = _cross_hospital_summary(records_with_emb, p1_results)
@@ -1923,3 +2177,6 @@ def run_analysis():
 @app.local_entrypoint()
 def main():
     run_analysis.remote()
+# lgbm-only-1774300735
+# narrative-1774305296
+# prod-ep1-1774307256

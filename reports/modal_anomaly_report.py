@@ -356,6 +356,8 @@ def _fetch_admission_details(records: list[tuple[str, int]], anomaly_z):
     JOIN tmp_anomaly_ids t
       ON i.ID_CD_INTERNACAO = t.iid
      AND i.source_db = t.source_db
+    WHERE (i.DH_ADMISSAO_HOSP >= CURRENT_DATE - INTERVAL '30 days'
+       OR i.IN_SITUACAO = 3)
     ORDER BY i.source_db, i.ID_CD_INTERNACAO
     """
     cur        = con.execute(q_inter)
@@ -363,26 +365,7 @@ def _fetch_admission_details(records: list[tuple[str, int]], anomaly_z):
     inter_rows = cur.fetchall()
 
     if not inter_rows:
-        print("    No admissions found -- querying most recent 2000 anomalies ...")
-        q_inter2 = f"""
-        SELECT i.ID_CD_INTERNACAO, i.ID_CD_PACIENTE, i.source_db,
-            i.DH_ADMISSAO_HOSP, i.DH_FINALIZACAO,
-            i.DS_DESCRICAO, i.DS_HISTORICO, i.DS_MOTIVO,
-            i.DS_CONDUTA_INTERNACAO, i.DS_DESCRICAO_EVOLUCAO,
-            DATEDIFF('day', i.DH_ADMISSAO_HOSP::DATE,
-                     COALESCE(i.DH_FINALIZACAO, CURRENT_TIMESTAMP)::DATE) AS LOS_DIAS,
-            i.NR_SENHA, i.NR_GUIA_AUTORIZACAO, i.ID_CD_HOSPITAL, i.IN_SITUACAO
-        FROM agg_tb_capta_internacao_cain i
-        JOIN tmp_anomaly_ids t
-          ON i.ID_CD_INTERNACAO = t.iid
-         AND i.source_db = t.source_db
-        WHERE i.DH_ADMISSAO_HOSP > '2000-01-01'
-        ORDER BY i.DH_ADMISSAO_HOSP DESC
-        LIMIT 2000
-        """
-        cur        = con.execute(q_inter2)
-        inter_cols = [d[0] for d in cur.description]
-        inter_rows = cur.fetchall()
+        print("    No recent anomalies found in the last 30 days.")
 
     admissions = [dict(zip(inter_cols, r)) for r in inter_rows]
     for a in admissions:
@@ -1742,3 +1725,6 @@ def generate_report():
 @app.local_entrypoint()
 def main():
     generate_report.remote()
+# 30d-filter-1774298005
+# fix-filter-1774298257
+# epoch2-1774305118
