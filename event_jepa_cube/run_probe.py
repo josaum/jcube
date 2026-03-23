@@ -28,6 +28,7 @@ probe_image = (
     timeout=3600,
 )
 def run_probes():
+    import os
     import sys
     import time
     import torch
@@ -36,9 +37,17 @@ def run_probes():
     import pyarrow.parquet as pq
     import pyarrow.compute as pc
 
+    # Force volume refresh to get latest checkpoints
+    cache_volume.reload()
+    data_volume.reload()
+
     GRAPH = "/data/jcube_graph.parquet"
-    WEIGHTS = "/cache/tkg-fullscale/node_emb_epoch_2.pt"
+    WEIGHTS = "/cache/tkg-fullscale/node_embeddings.pt"
     DB = "/data/aggregated_fixed_union.db"
+
+    # Verify file size (V4 should be ~8.4GB = 35M×64×4 bytes)
+    wsize = os.path.getsize(WEIGHTS)
+    print(f"Weights file: {WEIGHTS} ({wsize / 1e9:.1f} GB)")
 
     print("=" * 60)
     print("JCUBE DIGITAL TWIN — PROBE EVALUATION")
@@ -74,8 +83,11 @@ def run_probes():
     node_to_idx = {}
     entity_type_mask = {}
     for i, name in enumerate(node_names):
-        node_to_idx[str(name)] = i
-        parts = str(name).split("_")
+        sname = str(name)
+        node_to_idx[sname] = i
+        # Handle both V3 format "ID_CD_INTERNACAO_123" and V4 "GHO-BRADESCO/ID_CD_INTERNACAO_123"
+        rest = sname.split("/", 1)[-1] if "/" in sname else sname
+        parts = rest.split("_")
         if len(parts) >= 3 and parts[0] == "ID" and parts[1] == "CD":
             etype = parts[2]
             if etype not in entity_type_mask:
@@ -151,23 +163,26 @@ def run_probes():
 
     try:
         con = duckdb.connect(DB, read_only=True)
-        # FL_GLOSA = 'S' means billing denial exists
+        # Include source_db to build full V4 node keys
         glosa_q = """
-            SELECT CAST(ID_CD_INTERNACAO AS VARCHAR) AS eid,
+            SELECT source_db,
+                   CAST(ID_CD_INTERNACAO AS VARCHAR) AS eid,
                    CASE WHEN SUM(CASE WHEN FL_GLOSA = 'S' THEN 1 ELSE 0 END) > 0 THEN 1 ELSE 0 END AS has_glosa
             FROM agg_tb_fatura_fatu
-            WHERE ID_CD_INTERNACAO IS NOT NULL
-            GROUP BY ID_CD_INTERNACAO
+            WHERE ID_CD_INTERNACAO IS NOT NULL AND source_db IS NOT NULL
+            GROUP BY source_db, ID_CD_INTERNACAO
         """
         rows = con.execute(glosa_q).fetchall()
         con.close()
 
         X_list, y_list = [], []
-        for eid, label in rows:
-            key = f"ID_CD_INTERNACAO_{eid}"
-            if key in node_to_idx:
-                X_list.append(embeddings[node_to_idx[key]])
-                y_list.append(float(label))
+        for source_db, eid, label in rows:
+            # Try V4 format first, then V3
+            for key in [f"{source_db}/ID_CD_INTERNACAO_{eid}", f"ID_CD_INTERNACAO_{eid}"]:
+                if key in node_to_idx:
+                    X_list.append(embeddings[node_to_idx[key]])
+                    y_list.append(float(label))
+                    break
 
         if len(X_list) > 100:
             X = np.array(X_list)
@@ -201,23 +216,26 @@ def run_probes():
 
     try:
         con = duckdb.connect(DB, read_only=True)
-        # Actual LOS: admission date → finalization date (927K rows, median 5 days)
+        # Actual LOS: admission date → finalization date, with source_db for V4 matching
         los_q = """
-            SELECT CAST(ID_CD_INTERNACAO AS VARCHAR),
+            SELECT source_db,
+                   CAST(ID_CD_INTERNACAO AS VARCHAR) AS eid,
                    DATEDIFF('day', DH_ADMISSAO_HOSP, DH_FINALIZACAO) AS los
             FROM agg_tb_capta_internacao_cain
             WHERE DH_ADMISSAO_HOSP IS NOT NULL AND DH_FINALIZACAO IS NOT NULL
+              AND source_db IS NOT NULL
               AND DATEDIFF('day', DH_ADMISSAO_HOSP, DH_FINALIZACAO) BETWEEN 1 AND 365
         """
         rows = con.execute(los_q).fetchall()
         con.close()
 
         X_list, y_list = [], []
-        for eid, los in rows:
-            key = f"ID_CD_INTERNACAO_{eid}"
-            if key in node_to_idx:
-                X_list.append(embeddings[node_to_idx[key]])
-                y_list.append(float(los))
+        for source_db, eid, los in rows:
+            for key in [f"{source_db}/ID_CD_INTERNACAO_{eid}", f"ID_CD_INTERNACAO_{eid}"]:
+                if key in node_to_idx:
+                    X_list.append(embeddings[node_to_idx[key]])
+                    y_list.append(float(los))
+                    break
 
         if len(X_list) > 100:
             X = np.array(X_list)
@@ -305,3 +323,4 @@ def run_probes():
 @scale_app.local_entrypoint()
 def main():
     run_probes.remote()
+# V4 probe - 1774247977
