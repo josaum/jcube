@@ -43,7 +43,7 @@ def run_probes():
     data_volume.reload()
 
     GRAPH = "/data/jcube_graph.parquet"
-    WEIGHTS = "/cache/tkg-fullscale/node_embeddings.pt"
+    WEIGHTS = "/cache/tkg-fullscale/node_emb_epoch_2.pt"
     DB = "/data/aggregated_fixed_union.db"
 
     # Verify file size (V4 should be ~8.4GB = 35M×64×4 bytes)
@@ -463,7 +463,7 @@ def run_probes():
     isotropy = per_dim_var.min() / max(per_dim_var.max(), 1e-8)
     effective_dims = np.sum(per_dim_var > per_dim_var.max() * 0.01)
     print(f"  Isotropy (min/max variance ratio): {isotropy:.4f}")
-    print(f"  Effective dimensions (>1% of max var): {effective_dims}/64")
+    print(f"  Effective dimensions (>1% of max var): {effective_dims}/{embeddings.shape[1]}")
     print(f"  Per-dim variance range: [{per_dim_var.min():.6f}, {per_dim_var.max():.6f}]")
 
     print("\n" + "=" * 60)
