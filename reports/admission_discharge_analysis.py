@@ -1886,7 +1886,7 @@ def _gen_latex(
         r"Tamanho minimo de cluster: " + str(HDBSCAN_MIN_CLUSTER_SIZE_LEAF) + r" internacoes. "
         r"Pontos nao agrupados (outliers) sao reportados separadamente, "
         r"nao distorcendo a analise."
-        r"\par"
+        r"\par "
         r"Semaforo: \textcolor{red}{\textbf{VERMELHO}} = obito $>5\%$ ou evasao $>3\%$; "
         r"\textcolor{orange}{\textbf{AMARELO}} = alta complexa $>10\%$; "
         r"\textcolor{green!60!black}{\textbf{VERDE}} = padrao normal."

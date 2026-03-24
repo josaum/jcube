@@ -1,0 +1,1302 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[brazil]{babel}
+\usepackage{lmodern}
+\usepackage{geometry}
+\geometry{margin=2cm}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{colortbl}
+\usepackage{xcolor}
+\usepackage{parskip}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+\usepackage{microtype}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true,linkcolor=blue!60!black,urlcolor=blue}
+
+\definecolor{redlight}{HTML}{FFCCCC}
+\definecolor{yellowlight}{HTML}{FFF3CC}
+\definecolor{greenlight}{HTML}{CCFFCC}
+\definecolor{graylight}{HTML}{F0F0F0}
+
+\pagestyle{fancy}
+\fancyhf{}
+\rhead{JCUBE -- Analise de Admissao e Alta Hospitalar}
+\lhead{Confidencial}
+\rfoot{\thepage}
+\lfoot{2026-03-23}
+
+\titleformat{\section}{\large\bfseries}{}{0em}{}[\titlerule]
+\titleformat{\subsection}{\normalsize\bfseries}{}{0em}{}
+
+\begin{document}
+
+
+\begin{center}
+{\LARGE \textbf{Analise de Admissao e Alta Hospitalar}}\\[4pt]
+{\large JCUBE -- Embeddings V5 Graph-JEPA + LightGBM + HDBSCAN}\\[2pt]
+{\normalsize 2026-03-23}
+\end{center}
+\vspace{6pt}
+\noindent\rule{\textwidth}{0.4pt}
+\vspace{6pt}
+
+\section{Resumo Executivo}
+Este relatorio analisa 857,983 internacoes com alta confirmada (\texttt{IN\_SITUACAO=2}) em 45 hospitais, utilizando embeddings de 64 dimensoes treinados com Graph-JEPA V5 (35,2M nos, epoch 1). O tipo de alta real e obtido da ultima entrada em \texttt{agg\_tb\_capta\_evo\_status\_caes}, descrito via \texttt{agg\_tb\_capta\_tipo\_final\_monit\_fmon}. A metodologia substitui K-Means por HDBSCAN sobre indices de folhas do LightGBM (Part 2) e sobre embeddings brutos (Part 3), eliminando clusters artificiais e ruido forcado.
+
+\vspace{4pt}\noindent\textbf{Ranking de hospitais por AUC do modelo:}
+
+\begin{center}
+\begin{tabular}{lrrr}
+\toprule
+Hospital & N & Macro-AUC & Status \\
+\midrule
+\rowcolor{green!20}GHO-COPASS & 1,029 & 0.762 & OK \\
+\rowcolor{green!20}GOHOSP-CNU & 236,895 & 0.760 & OK \\
+\rowcolor{yellow!20}GHO-PINDAMONHANGABA & 1,548 & 0.747 & OK \\
+\rowcolor{yellow!20}GHO-PORTOSEGURO & 2,190 & 0.745 & OK \\
+\rowcolor{yellow!20}PASA & 127,484 & 0.734 & OK \\
+\rowcolor{yellow!20}GHO-AUDITORIA-FESP & 443 & 0.734 & OK \\
+\rowcolor{yellow!20}GHO-PETROBRAS & 102,934 & 0.733 & OK \\
+\rowcolor{yellow!20}GHO-SAOVICENTE & 3,068 & 0.724 & OK \\
+\rowcolor{yellow!20}GHO-ABERTTA & 6,297 & 0.714 & OK \\
+\rowcolor{yellow!20}GHO-AMIL & 2,354 & 0.697 & OK \\
+\rowcolor{yellow!20}GHO-UNIMEDSANTOS & 70,857 & 0.688 & OK \\
+\rowcolor{yellow!20}GHO-REALGRANDEZA & 4,521 & 0.685 & OK \\
+\rowcolor{yellow!20}GHO-BRADESCO & 67,609 & 0.683 & OK \\
+\rowcolor{yellow!20}Capesesp & 2,237 & 0.673 & OK \\
+\rowcolor{yellow!20}GHO-SULAMERICA & 5,588 & 0.658 & OK \\
+\rowcolor{yellow!20}GHO-CASSI & 25,564 & 0.657 & OK \\
+\rowcolor{yellow!20}GHO-COPEL & 347 & 0.640 & OK \\
+\rowcolor{yellow!20}Cerrado & 1,499 & 0.638 & OK \\
+\rowcolor{yellow!20}GHO-CUIDARME & 1,234 & 0.638 & OK \\
+\rowcolor{yellow!20}GHO-FESP & 5,110 & 0.633 & OK \\
+\rowcolor{yellow!20}GHO-UNIMEDVITORIA2 & 9,533 & 0.630 & OK \\
+\rowcolor{yellow!20}GHO-CASU & 723 & 0.629 & OK \\
+\rowcolor{red!20}GHO-POSTAL & 1,782 & 0.596 & OK \\
+\rowcolor{red!20}GHO-APUB & 338 & 0.593 & OK \\
+\rowcolor{red!20}GHO-INTERMEDICA & 12,806 & 0.588 & OK \\
+\rowcolor{red!20}GHO-SAMI & 1,814 & 0.586 & OK \\
+\rowcolor{red!20}GHO-BLUEMED & 3,556 & 0.586 & OK \\
+\rowcolor{red!20}GHO-METRUS & 842 & 0.570 & OK \\
+\rowcolor{red!20}GHO-ASFEB & 509 & 0.559 & OK \\
+\rowcolor{red!20}GHO-MEDTOUR & 1,198 & 0.548 & OK \\
+\rowcolor{red!20}GHO-ICS & 209 & 0.539 & OK \\
+\rowcolor{red!20}GHO-GOLDENCROSS & 687 & 0.480 & OK \\
+\rowcolor{red!20}GHO-SJ-RIOPRETO & 331 & 0.371 & OK \\
+GHO-AMAFRESP & --- & --- & \textcolor{red}{Sem dados} \\
+GHO-ASPARA & --- & --- & \textcolor{red}{Sem dados} \\
+GHO-CABESP & --- & --- & \textcolor{red}{Sem dados} \\
+GHO-CUIABA & --- & --- & \textcolor{red}{Sem dados} \\
+GHO-GAMA & --- & --- & \textcolor{red}{Sem dados} \\
+GHO-IPASGO & --- & --- & \textcolor{red}{Sem dados} \\
+GHO-KLINI & --- & --- & \textcolor{red}{Sem dados} \\
+GHO-SALUD & --- & --- & \textcolor{red}{Sem dados} \\
+GHO-SANTACASA & --- & --- & \textcolor{red}{Sem dados} \\
+GHO-SANTACASA-STOS & --- & --- & \textcolor{red}{Sem dados} \\
+GHO-UNIMEDSOROCABA & --- & --- & \textcolor{red}{Sem dados} \\
+GHO-ZERRENNER & --- & --- & \textcolor{red}{Sem dados} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\vspace{4pt}\noindent\textbf{Distribuicao global de desfechos (internacoes com alta):}
+
+\begin{center}
+\begin{tabular}{lrrl}
+\toprule
+Categoria & N & \% & Semaforo \\
+\midrule
+\rowcolor{green!20}ALTA\_NORMAL & 669,519 & 78.0\% & \textcolor{green!60!black}{$\bullet$} \\
+\rowcolor{blue!10}EM\_CURSO & 118,485 & 13.8\% & \textcolor{gray}{$\circ$} \\
+\rowcolor{orange!30}ALTA\_COMPLEXA & 30,056 & 3.5\% & \textcolor{orange}{\textbf{$\bullet$}} \\
+\rowcolor{red!30}OBITO & 22,920 & 2.7\% & \textcolor{red}{\textbf{$\bullet$}} \\
+\rowcolor{yellow!30}TRANSFERENCIA & 2,347 & 0.3\% & \textcolor{orange!80!black}{$\bullet$} \\
+\rowcolor{gray!15}ADMINISTRATIVO & 4,714 & 0.5\% & \textcolor{gray}{$\circ$} \\
+\rowcolor{cyan!15}NEONATAL & 70 & 0.0\% & \textcolor{gray}{$\circ$} \\
+\rowcolor{gray!10}OUTRO & 9,872 & 1.2\% & \textcolor{gray}{$\circ$} \\
+\bottomrule
+\end{tabular}
+\end{center}
+\newpage
+\section{Parte 1 --- Previsao de Desfecho por Hospital (LightGBM)}
+Para cada hospital com mais de 100 internacoes com desfecho conhecido (IN\_SITUACAO=2), treinamos um modelo LightGBM multiclasse com 5-fold CV estratificado. Features: embedding de 64 dimensoes + urgencia, dia da semana, mes, ano, convenio (encoded), CID (encoded), admissoes anteriores. Classes alvo: ALTA\_NORMAL, OBITO, ALTA\_COMPLEXA, TRANSFERENCIA, EVASAO (exclui EM\_CURSO, NEONATAL, ADMINISTRATIVO). Apos o treinamento, extraimos os indices de folha (leaf indices) do modelo final para uso no clustering da Parte 2.
+
+\subsection{Capesesp}
+\textbf{n=2,237} internacoes com desfecho $\cdot$ \textbf{macro-AUC: 0.673} $\cdot$ 5-fold CV estratificado
+
+\begin{tabular}{lrr|lrr}
+\toprule
+Classe & N & \% & Classe & Precisao & Recall \\
+\midrule
+ALTA\_COMPLEXA & 99 & 4.4\% & ALTA\_NORMAL & 0.90 & 0.98 \\
+OBITO & 139 & 6.2\% & TRANSFERENCIA & 0.00 & 0.00 \\
+\bottomrule
+\end{tabular}
+
+\vspace{4pt}\noindent\textbf{Top-10 features por importancia:}
+
+\begin{tabular}{llr}
+\toprule
+Feature & Semantica & Importancia \\
+\midrule
+cid\_code\_enc & cid\_code\_enc & 423.8 \\
+admission\_month & admission\_month & 256.0 \\
+emb[2] & dim2 & 244.0 \\
+emb[1] & dim1 & 241.8 \\
+emb[3] & dim3 & 238.8 \\
+emb[29] & dim29 & 232.6 \\
+emb[0] & dim0 & 229.6 \\
+emb[13] & dim13 & 228.2 \\
+emb[7] & dim7 & 227.8 \\
+emb[38] & dim38 & 225.2 \\
+\bottomrule
+\end{tabular}
+
+\vspace{4pt}\noindent\textit{Em Capesesp, os principais preditores de desfecho sao: CID de admissao, admission\_month, embedding dim[2] (dim2). Obito representa 6.2\% das saidas (139 casos no conjunto de treino/validacao). O modelo identifica obito com precisao=0.27 e recall=0.11 (macro-AUC reportado acima).}
+
+\subsection{Cerrado}
+\textbf{n=1,499} internacoes com desfecho $\cdot$ \textbf{macro-AUC: 0.638} $\cdot$ 5-fold CV estratificado
+
+\begin{tabular}{lrr|lrr}
+\toprule
+Classe & N & \% & Classe & Precisao & Recall \\
+\midrule
+ALTA\_COMPLEXA & 26 & 1.7\% & ALTA\_NORMAL & 0.92 & 1.00 \\
+OBITO & 77 & 5.1\% & TRANSFERENCIA & 0.00 & 0.00 \\
+\bottomrule
+\end{tabular}
+
+\vspace{4pt}\noindent\textbf{Top-10 features por importancia:}
+
+\begin{tabular}{llr}
+\toprule
+Feature & Semantica & Importancia \\
+\midrule
+cid\_code\_enc & cid\_code\_enc & 450.4 \\
+emb[14] & dim14 & 170.0 \\
+emb[59] & dim59 & 165.2 \\
+emb[32] & stay duration signal & 164.0 \\
+emb[0] & dim0 & 159.2 \\
+emb[35] & dim35 & 156.2 \\
+emb[12] & dim12 & 152.6 \\
+emb[3] & dim3 & 150.8 \\
+emb[57] & dim57 & 150.8 \\
+admission\_month & admission\_month & 150.2 \\
+\bottomrule
+\end{tabular}
+
+\vspace{4pt}\noindent\textit{Em Cerrado, os principais preditores de desfecho sao: CID de admissao, embedding dim[14] (dim14), embedding dim[59] (dim59). Obito representa 5.1\% das saidas (77 casos no conjunto de treino/validacao). O modelo identifica obito com precisao=0.50 e recall=0.01 (macro-AUC reportado acima).}
+
+\subsection{GHO-ABERTTA}
+\textbf{n=6,297} internacoes com desfecho $\cdot$ \textbf{macro-AUC: 0.714} $\cdot$ 5-fold CV estratificado
+
+\begin{tabular}{lrr|lrr}
+\toprule
+Classe & N & \% & Classe & Precisao & Recall \\
+\midrule
+ALTA\_COMPLEXA & 65 & 1.0\% & ALTA\_NORMAL & 0.97 & 1.00 \\
+OBITO & 47 & 0.7\% & TRANSFERENCIA & 0.00 & 0.00 \\
+\bottomrule
+\end{tabular}
+
+\vspace{4pt}\noindent\textbf{Top-10 features por importancia:}
+
+\begin{tabular}{llr}
+\toprule
+Feature & Semantica & Importancia \\
+\midrule
+cid\_code\_enc & cid\_code\_enc & 572.8 \\
+prior\_admissions & prior\_admissions & 290.8 \\
+emb[63] & dim63 & 271.8 \\
+admission\_dow & admission\_dow & 269.4 \\
+emb[19] & dim19 & 268.8 \\
+emb[7] & dim7 & 265.2 \\
+emb[55] & dim55 & 264.4 \\
+admission\_month & admission\_month & 257.4 \\
+emb[16] & billing pattern & 253.4 \\
+emb[51] & dim51 & 246.8 \\
+\bottomrule
+\end{tabular}
+
+\vspace{4pt}\noindent\textit{Em GHO-ABERTTA, os principais preditores de desfecho sao: CID de admissao, admissoes anteriores, embedding dim[63] (dim63). Obito representa 0.7\% das saidas (47 casos no conjunto de treino/validacao). O modelo identifica obito com precisao=0.00 e recall=0.00 (macro-AUC reportado acima).}
+
+\subsection{GHO-AMAFRESP}
+\textcolor{red}{Erro: Only 8 eligible rows (< 100)}
+
+\subsection{GHO-AMIL}
+\textbf{n=2,354} internacoes com desfecho $\cdot$ \textbf{macro-AUC: 0.697} $\cdot$ 5-fold CV estratificado
+
+\begin{tabular}{lrr|lrr}
+\toprule
+Classe & N & \% & Classe & Precisao & Recall \\
+\midrule
+ALTA\_COMPLEXA & 70 & 3.0\% & ALTA\_NORMAL & 0.93 & 0.99 \\
+OBITO & 72 & 3.1\% & TRANSFERENCIA & 0.00 & 0.00 \\
+\bottomrule
+\end{tabular}
+
+\vspace{4pt}\noindent\textbf{Top-10 features por importancia:}
+
+\begin{tabular}{llr}
+\toprule
+Feature & Semantica & Importancia \\
+\midrule
+cid\_code\_enc & cid\_code\_enc & 444.6 \\
+emb[48] & dim48 & 279.4 \\
+emb[21] & dim21 & 254.6 \\
+emb[0] & dim0 & 230.8 \\
+emb[30] & procedure volume & 227.0 \\
+emb[13] & dim13 & 211.6 \\
+emb[27] & dim27 & 211.0 \\
+emb[19] & dim19 & 199.2 \\
+emb[24] & dim24 & 192.0 \\
+emb[8] & dim8 & 191.8 \\
+\bottomrule
+\end{tabular}
+
+\vspace{4pt}\noindent\textit{Em GHO-AMIL, os principais preditores de desfecho sao: CID de admissao, embedding dim[48] (dim48), embedding dim[21] (dim21). Obito representa 3.1\% das saidas (72 casos no conjunto de treino/validacao). O modelo identifica obito com precisao=0.00 e recall=0.00 (macro-AUC reportado acima).}
+
+\subsection{GHO-APUB}
+\textbf{n=338} internacoes com desfecho $\cdot$ \textbf{macro-AUC: 0.593} $\cdot$ 2-fold CV estratificado
+
+\begin{tabular}{lrr|lrr}
+\toprule
+Classe & N & \% & Classe & Precisao & Recall \\
+\midrule
+ALTA\_COMPLEXA & 38 & 11.2\% & ALTA\_NORMAL & 0.82 & 0.94 \\
+OBITO & 26 & 7.7\% & TRANSFERENCIA & 0.00 & 0.00 \\
+\bottomrule
+\end{tabular}
+
+\vspace{4pt}\noindent\textbf{Top-10 features por importancia:}
+
+\begin{tabular}{llr}
+\toprule
+Feature & Semantica & Importancia \\
+\midrule
+emb[41] & dim41 & 81.5 \\
+prior\_admissions & prior\_admissions & 65.0 \\
+emb[13] & dim13 & 57.0 \\
+cid\_code\_enc & cid\_code\_enc & 53.0 \\
+emb[21] & dim21 & 52.5 \\
+emb[33] & dim33 & 52.5 \\
+emb[11] & dim11 & 52.0 \\
+emb[12] & dim12 & 48.0 \\
+emb[31] & dim31 & 48.0 \\
+emb[29] & dim29 & 47.0 \\
+\bottomrule
+\end{tabular}
+
+\vspace{4pt}\noindent\textit{Em GHO-APUB, os principais preditores de desfecho sao: embedding dim[41] (dim41), admissoes anteriores, embedding dim[13] (dim13). Obito representa 7.7\% das saidas (26 casos no conjunto de treino/validacao). O modelo identifica obito com precisao=0.00 e recall=0.00 (macro-AUC reportado acima).}
+
+\subsection{GHO-ASFEB}
+\textbf{n=509} internacoes com desfecho $\cdot$ \textbf{macro-AUC: 0.559} $\cdot$ 5-fold CV estratificado
+
+\begin{tabular}{lrr|lrr}
+\toprule
+Classe & N & \% & Classe & Precisao & Recall \\
+\midrule
+ALTA\_COMPLEXA & 136 & 26.7\% & ALTA\_NORMAL & 0.67 & 0.87 \\
+OBITO & 50 & 9.8\% & TRANSFERENCIA & 0.00 & 0.00 \\
+\bottomrule
+\end{tabular}
+
+\vspace{4pt}\noindent\textbf{Top-10 features por importancia:}
+
+\begin{tabular}{llr}
+\toprule
+Feature & Semantica & Importancia \\
+\midrule
+cid\_code\_enc & cid\_code\_enc & 185.8 \\
+prior\_admissions & prior\_admissions & 137.2 \\
+emb[7] & dim7 & 129.8 \\
+emb[24] & dim24 & 121.4 \\
+emb[59] & dim59 & 121.2 \\
+emb[48] & dim48 & 120.2 \\
+emb[37] & dim37 & 119.0 \\
+emb[1] & dim1 & 118.0 \\
+emb[57] & dim57 & 117.6 \\
+emb[27] & dim27 & 113.2 \\
+\bottomrule
+\end{tabular}
+
+\vspace{4pt}\noindent\textit{Em GHO-ASFEB, os principais preditores de desfecho sao: CID de admissao, admissoes anteriores, embedding dim[7] (dim7). Obito representa 9.8\% das saidas (50 casos no conjunto de treino/validacao). O modelo identifica obito com precisao=0.00 e recall=0.00 (macro-AUC reportado acima).}
+
+\subsection{GHO-ASPARA}
+\textcolor{red}{Erro: Smallest class has 1 samples — need >= 2 for CV}
+
+\subsection{GHO-AUDITORIA-FESP}
+\textbf{n=443} internacoes com desfecho $\cdot$ \textbf{macro-AUC: 0.734} $\cdot$ 5-fold CV estratificado
+
+\begin{tabular}{lrr|lrr}
+\toprule
+Classe & N & \% & Classe & Precisao & Recall \\
+\midrule
+ALTA\_COMPLEXA & 32 & 7.2\% & ALTA\_NORMAL & 0.93 & 0.97 \\
+OBITO & 8 & 1.8\% &  & --- & --- \\
+\bottomrule
+\end{tabular}
+
+\vspace{4pt}\noindent\textbf{Top-10 features por importancia:}
+
+\begin{tabular}{llr}
+\toprule
+Feature & Semantica & Importancia \\
+\midrule
+emb[2] & dim2 & 162.6 \\
+prior\_admissions & prior\_admissions & 153.6 \\
+cid\_code\_enc & cid\_code\_enc & 132.6 \\
+emb[18] & dim18 & 114.4 \\
+emb[5] & dim5 & 87.2 \\
+emb[27] & dim27 & 85.4 \\
+emb[20] & dim20 & 83.6 \\
+emb[30] & procedure volume & 82.0 \\
+emb[58] & dim58 & 74.8 \\
+emb[60] & dim60 & 71.0 \\
+\bottomrule
+\end{tabular}
+
+\vspace{4pt}\noindent\textit{Em GHO-AUDITORIA-FESP, os principais preditores de desfecho sao: embedding dim[2] (dim2), admissoes anteriores, CID de admissao. Obito representa 1.8\% das saidas (8 casos no conjunto de treino/validacao). O modelo identifica obito com precisao=0.00 e recall=0.00 (macro-AUC reportado acima).}
+
+\subsection{GHO-BLUEMED}
+\textbf{n=3,556} internacoes com desfecho $\cdot$ \textbf{macro-AUC: 0.586} $\cdot$ 5-fold CV estratificado
+
+\begin{tabular}{lrr|lrr}
+\toprule
+Classe & N & \% & Classe & Precisao & Recall \\
+\midrule
+ALTA\_COMPLEXA & 39 & 1.1\% & ALTA\_NORMAL & 0.95 & 1.00 \\
+OBITO & 100 & 2.8\% & TRANSFERENCIA & 0.00 & 0.00 \\
+\bottomrule
+\end{tabular}
+
+\vspace{4pt}\noindent\textbf{Top-10 features por importancia:}
+
+\begin{tabular}{llr}
+\toprule
+Feature & Semantica & Importancia \\
+\midrule
+cid\_code\_enc & cid\_code\_enc & 703.2 \\
+emb[54] & dim54 & 255.0 \\
+emb[23] & dim23 & 253.6 \\
+emb[15] & dim15 & 244.6 \\
+emb[28] & clinical complexity & 243.8 \\
+admission\_dow & admission\_dow & 234.6 \\
+emb[53] & glosa risk & 230.2 \\
+emb[16] & billing pattern & 227.8 \\
+emb[56] & dim56 & 216.0 \\
+emb[31] & dim31 & 214.8 \\
+\bottomrule
+\end{tabular}
+
+\vspace{4pt}\noindent\textit{Em GHO-BLUEMED, os principais preditores de desfecho sao: CID de admissao, embedding dim[54] (dim54), embedding dim[23] (dim23). Obito representa 2.8\% das saidas (100 casos no conjunto de treino/validacao). O modelo identifica obito com precisao=0.20 e recall=0.01 (macro-AUC reportado acima).}
+
+\subsection{GHO-BRADESCO}
+\textbf{n=67,609} internacoes com desfecho $\cdot$ \textbf{macro-AUC: 0.683} $\cdot$ 5-fold CV estratificado
+
+\begin{tabular}{lrr|lrr}
+\toprule
+Classe & N & \% & Classe & Precisao & Recall \\
+\midrule
+ALTA\_COMPLEXA & 2,345 & 3.5\% & ALTA\_NORMAL & 0.95 & 0.96 \\
+OBITO & 1,144 & 1.7\% & TRANSFERENCIA & 0.00 & 0.00 \\
+\bottomrule
+\end{tabular}
+
+\vspace{4pt}\noindent\textbf{Top-10 features por importancia:}
+
+\begin{tabular}{llr}
+\toprule
+Feature & Semantica & Importancia \\
+\midrule
+cid\_code\_enc & cid\_code\_enc & 1884.0 \\
+emb[6] & dim6 & 1168.8 \\
+emb[29] & dim29 & 1165.2 \\
+emb[24] & dim24 & 1163.2 \\
+emb[59] & dim59 & 1162.2 \\
+emb[58] & dim58 & 1148.2 \\
+emb[28] & clinical complexity & 1146.4 \\
+emb[46] & temporal trajectory & 1143.4 \\
+emb[34] & dim34 & 1142.6 \\
+emb[42] & dim42 & 1140.4 \\
+\bottomrule
+\end{tabular}
+
+\vspace{4pt}\noindent\textit{Em GHO-BRADESCO, os principais preditores de desfecho sao: CID de admissao, embedding dim[6] (dim6), embedding dim[29] (dim29). Obito representa 1.7\% das saidas (1144 casos no conjunto de treino/validacao). O modelo identifica obito com precisao=0.08 e recall=0.03 (macro-AUC reportado acima).}
+
+\subsection{GHO-CABESP}
+\textcolor{red}{Erro: Only 56 eligible rows (< 100)}
+
+\subsection{GHO-CASSI}
+\textbf{n=25,564} internacoes com desfecho $\cdot$ \textbf{macro-AUC: 0.657} $\cdot$ 5-fold CV estratificado
+
+\begin{tabular}{lrr|lrr}
+\toprule
+Classe & N & \% & Classe & Precisao & Recall \\
+\midrule
+ALTA\_COMPLEXA & 905 & 3.5\% & ALTA\_NORMAL & 0.93 & 0.99 \\
+OBITO & 990 & 3.9\% & TRANSFERENCIA & 0.00 & 0.00 \\
+\bottomrule
+\end{tabular}
+
+\vspace{4pt}\noindent\textbf{Top-10 features por importancia:}
+
+\begin{tabular}{llr}
+\toprule
+Feature & Semantica & Importancia \\
+\midrule
+cid\_code\_enc & cid\_code\_enc & 1341.6 \\
+emb[22] & dim22 & 1014.8 \\
+emb[3] & dim3 & 977.0 \\
+emb[7] & dim7 & 963.4 \\
+emb[42] & dim42 & 958.8 \\
+emb[15] & dim15 & 957.2 \\
+emb[39] & dim39 & 953.0 \\
+emb[30] & procedure volume & 950.6 \\
+emb[32] & stay duration signal & 948.8 \\
+emb[26] & dim26 & 948.4 \\
+\bottomrule
+\end{tabular}
+
+\vspace{4pt}\noindent\textit{Em GHO-CASSI, os principais preditores de desfecho sao: CID de admissao, embedding dim[22] (dim22), embedding dim[3] (dim3). Obito representa 3.9\% das saidas (990 casos no conjunto de treino/validacao). O modelo identifica obito com precisao=0.28 e recall=0.08 (macro-AUC reportado acima).}
+
+\subsection{GHO-CASU}
+\textbf{n=723} internacoes com desfecho $\cdot$ \textbf{macro-AUC: 0.629} $\cdot$ 5-fold CV estratificado
+
+\begin{tabular}{lrr|lrr}
+\toprule
+Classe & N & \% & Classe & Precisao & Recall \\
+\midrule
+ALTA\_COMPLEXA & 5 & 0.7\% & ALTA\_NORMAL & 0.95 & 0.99 \\
+OBITO & 14 & 1.9\% & TRANSFERENCIA & 0.00 & 0.00 \\
+\bottomrule
+\end{tabular}
+
+\vspace{4pt}\noindent\textbf{Top-10 features por importancia:}
+
+\begin{tabular}{llr}
+\toprule
+Feature & Semantica & Importancia \\
+\midrule
+cid\_code\_enc & cid\_code\_enc & 166.6 \\
+admission\_month & admission\_month & 151.0 \\
+emb[0] & dim0 & 125.2 \\
+emb[29] & dim29 & 107.2 \\
+emb[44] & dim44 & 105.2 \\
+emb[1] & dim1 & 104.4 \\
+emb[21] & dim21 & 95.8 \\
+emb[43] & dim43 & 91.0 \\
+prior\_admissions & prior\_admissions & 87.6 \\
+emb[2] & dim2 & 85.6 \\
+\bottomrule
+\end{tabular}
+
+\vspace{4pt}\noindent\textit{Em GHO-CASU, os principais preditores de desfecho sao: CID de admissao, admission\_month, embedding dim[0] (dim0). Obito representa 1.9\% das saidas (14 casos no conjunto de treino/validacao). O modelo identifica obito com precisao=0.00 e recall=0.00 (macro-AUC reportado acima).}
+
+\subsection{GHO-COPASS}
+\textbf{n=1,029} internacoes com desfecho $\cdot$ \textbf{macro-AUC: 0.762} $\cdot$ 5-fold CV estratificado
+
+\begin{tabular}{lrr|lrr}
+\toprule
+Classe & N & \% & Classe & Precisao & Recall \\
+\midrule
+ALTA\_COMPLEXA & 25 & 2.4\% & ALTA\_NORMAL & 0.95 & 0.99 \\
+OBITO & 23 & 2.2\% & TRANSFERENCIA & 0.00 & 0.00 \\
+\bottomrule
+\end{tabular}
+
+\vspace{4pt}\noindent\textbf{Top-10 features por importancia:}
+
+\begin{tabular}{llr}
+\toprule
+Feature & Semantica & Importancia \\
+\midrule
+cid\_code\_enc & cid\_code\_enc & 199.0 \\
+admission\_dow & admission\_dow & 154.2 \\
+fl\_urgencia & fl\_urgencia & 145.2 \\
+prior\_admissions & prior\_admissions & 141.2 \\
+emb[6] & dim6 & 134.6 \\
+emb[35] & dim35 & 120.8 \\
+emb[60] & dim60 & 100.0 \\
+emb[30] & procedure volume & 99.2 \\
+emb[8] & dim8 & 95.2 \\
+emb[29] & dim29 & 94.2 \\
+\bottomrule
+\end{tabular}
+
+\vspace{4pt}\noindent\textit{Em GHO-COPASS, os principais preditores de desfecho sao: CID de admissao, admission\_dow, urgencia flag. Obito representa 2.2\% das saidas (23 casos no conjunto de treino/validacao). O modelo identifica obito com precisao=0.00 e recall=0.00 (macro-AUC reportado acima).}
+
+\subsection{GHO-COPEL}
+\textbf{n=347} internacoes com desfecho $\cdot$ \textbf{macro-AUC: 0.640} $\cdot$ 2-fold CV estratificado
+
+\begin{tabular}{lrr|lrr}
+\toprule
+Classe & N & \% & Classe & Precisao & Recall \\
+\midrule
+ALTA\_COMPLEXA & 27 & 7.8\% & ALTA\_NORMAL & 0.83 & 0.92 \\
+OBITO & 33 & 9.5\% & TRANSFERENCIA & 0.00 & 0.00 \\
+\bottomrule
+\end{tabular}
+
+\vspace{4pt}\noindent\textbf{Top-10 features por importancia:}
+
+\begin{tabular}{llr}
+\toprule
+Feature & Semantica & Importancia \\
+\midrule
+emb[56] & dim56 & 63.0 \\
+cid\_code\_enc & cid\_code\_enc & 62.0 \\
+emb[12] & dim12 & 60.0 \\
+emb[27] & dim27 & 56.5 \\
+emb[5] & dim5 & 54.0 \\
+emb[41] & dim41 & 52.5 \\
+emb[60] & dim60 & 51.5 \\
+emb[3] & dim3 & 50.0 \\
+emb[63] & dim63 & 50.0 \\
+emb[58] & dim58 & 47.5 \\
+\bottomrule
+\end{tabular}
+
+\vspace{4pt}\noindent\textit{Em GHO-COPEL, os principais preditores de desfecho sao: embedding dim[56] (dim56), CID de admissao, embedding dim[12] (dim12). Obito representa 9.5\% das saidas (33 casos no conjunto de treino/validacao). O modelo identifica obito com precisao=0.13 e recall=0.06 (macro-AUC reportado acima).}
+
+\subsection{GHO-CUIABA}
+\textcolor{red}{Erro: Smallest class has 1 samples — need >= 2 for CV}
+
+\subsection{GHO-CUIDARME}
+\textbf{n=1,234} internacoes com desfecho $\cdot$ \textbf{macro-AUC: 0.638} $\cdot$ 5-fold CV estratificado
+
+\begin{tabular}{lrr|lrr}
+\toprule
+Classe & N & \% & Classe & Precisao & Recall \\
+\midrule
+ALTA\_COMPLEXA & 25 & 2.0\% & ALTA\_NORMAL & 0.95 & 1.00 \\
+OBITO & 25 & 2.0\% & TRANSFERENCIA & 0.00 & 0.00 \\
+\bottomrule
+\end{tabular}
+
+\vspace{4pt}\noindent\textbf{Top-10 features por importancia:}
+
+\begin{tabular}{llr}
+\toprule
+Feature & Semantica & Importancia \\
+\midrule
+cid\_code\_enc & cid\_code\_enc & 184.6 \\
+emb[43] & dim43 & 145.0 \\
+emb[24] & dim24 & 127.4 \\
+emb[55] & dim55 & 117.6 \\
+emb[59] & dim59 & 116.4 \\
+admission\_month & admission\_month & 102.2 \\
+emb[32] & stay duration signal & 100.6 \\
+prior\_admissions & prior\_admissions & 100.2 \\
+emb[1] & dim1 & 97.6 \\
+emb[11] & dim11 & 97.4 \\
+\bottomrule
+\end{tabular}
+
+\vspace{4pt}\noindent\textit{Em GHO-CUIDARME, os principais preditores de desfecho sao: CID de admissao, embedding dim[43] (dim43), embedding dim[24] (dim24). Obito representa 2.0\% das saidas (25 casos no conjunto de treino/validacao). O modelo identifica obito com precisao=0.00 e recall=0.00 (macro-AUC reportado acima).}
+
+\subsection{GHO-FESP}
+\textbf{n=5,110} internacoes com desfecho $\cdot$ \textbf{macro-AUC: 0.633} $\cdot$ 5-fold CV estratificado
+
+\begin{tabular}{lrr|lrr}
+\toprule
+Classe & N & \% & Classe & Precisao & Recall \\
+\midrule
+ALTA\_COMPLEXA & 604 & 11.8\% & ALTA\_NORMAL & 0.83 & 0.96 \\
+OBITO & 303 & 5.9\% & TRANSFERENCIA & 0.00 & 0.00 \\
+\bottomrule
+\end{tabular}
+
+\vspace{4pt}\noindent\textbf{Top-10 features por importancia:}
+
+\begin{tabular}{llr}
+\toprule
+Feature & Semantica & Importancia \\
+\midrule
+cid\_code\_enc & cid\_code\_enc & 691.6 \\
+emb[37] & dim37 & 413.0 \\
+emb[14] & dim14 & 382.8 \\
+emb[12] & dim12 & 379.4 \\
+emb[31] & dim31 & 373.0 \\
+emb[26] & dim26 & 364.8 \\
+emb[51] & dim51 & 359.8 \\
+emb[18] & dim18 & 353.8 \\
+emb[50] & dim50 & 352.0 \\
+emb[41] & dim41 & 349.4 \\
+\bottomrule
+\end{tabular}
+
+\vspace{4pt}\noindent\textit{Em GHO-FESP, os principais preditores de desfecho sao: CID de admissao, embedding dim[37] (dim37), embedding dim[14] (dim14). Obito representa 5.9\% das saidas (303 casos no conjunto de treino/validacao). O modelo identifica obito com precisao=0.29 e recall=0.08 (macro-AUC reportado acima).}
+
+\subsection{GHO-GAMA}
+\textcolor{red}{Erro: Only 59 eligible rows (< 100)}
+
+\subsection{GHO-GOLDENCROSS}
+\textbf{n=687} internacoes com desfecho $\cdot$ \textbf{macro-AUC: 0.480} $\cdot$ 4-fold CV estratificado
+
+\begin{tabular}{lrr|lrr}
+\toprule
+Classe & N & \% & Classe & Precisao & Recall \\
+\midrule
+ALTA\_COMPLEXA & 32 & 4.7\% & ALTA\_NORMAL & 0.93 & 1.00 \\
+OBITO & 15 & 2.2\% & TRANSFERENCIA & 0.00 & 0.00 \\
+\bottomrule
+\end{tabular}
+
+\vspace{4pt}\noindent\textbf{Top-10 features por importancia:}
+
+\begin{tabular}{llr}
+\toprule
+Feature & Semantica & Importancia \\
+\midrule
+cid\_code\_enc & cid\_code\_enc & 160.2 \\
+emb[1] & dim1 & 98.5 \\
+emb[16] & billing pattern & 96.8 \\
+emb[9] & dim9 & 87.8 \\
+emb[12] & dim12 & 85.5 \\
+prior\_admissions & prior\_admissions & 84.2 \\
+admission\_month & admission\_month & 81.2 \\
+emb[35] & dim35 & 79.2 \\
+emb[22] & dim22 & 77.5 \\
+emb[44] & dim44 & 73.5 \\
+\bottomrule
+\end{tabular}
+
+\vspace{4pt}\noindent\textit{Em GHO-GOLDENCROSS, os principais preditores de desfecho sao: CID de admissao, embedding dim[1] (dim1), embedding dim[16] (billing pattern). Obito representa 2.2\% das saidas (15 casos no conjunto de treino/validacao). O modelo identifica obito com precisao=0.00 e recall=0.00 (macro-AUC reportado acima).}
+
+\subsection{GHO-ICS}
+\textbf{n=209} internacoes com desfecho $\cdot$ \textbf{macro-AUC: 0.539} $\cdot$ 2-fold CV estratificado
+
+\begin{tabular}{lrr|lrr}
+\toprule
+Classe & N & \% & Classe & Precisao & Recall \\
+\midrule
+ALTA\_COMPLEXA & 3 & 1.4\% & ALTA\_NORMAL & 0.92 & 0.97 \\
+OBITO & 13 & 6.2\% & TRANSFERENCIA & 0.00 & 0.00 \\
+\bottomrule
+\end{tabular}
+
+\vspace{4pt}\noindent\textbf{Top-10 features por importancia:}
+
+\begin{tabular}{llr}
+\toprule
+Feature & Semantica & Importancia \\
+\midrule
+emb[22] & dim22 & 51.5 \\
+emb[12] & dim12 & 48.0 \\
+emb[24] & dim24 & 46.0 \\
+emb[18] & dim18 & 37.0 \\
+emb[1] & dim1 & 31.5 \\
+emb[52] & dim52 & 30.0 \\
+emb[3] & dim3 & 28.5 \\
+emb[16] & billing pattern & 28.0 \\
+emb[63] & dim63 & 27.5 \\
+emb[11] & dim11 & 26.5 \\
+\bottomrule
+\end{tabular}
+
+\vspace{4pt}\noindent\textit{Em GHO-ICS, os principais preditores de desfecho sao: embedding dim[22] (dim22), embedding dim[12] (dim12), embedding dim[24] (dim24). Obito representa 6.2\% das saidas (13 casos no conjunto de treino/validacao). O modelo identifica obito com precisao=0.00 e recall=0.00 (macro-AUC reportado acima).}
+
+\subsection{GHO-INTERMEDICA}
+\textbf{n=12,806} internacoes com desfecho $\cdot$ \textbf{macro-AUC: 0.588} $\cdot$ 5-fold CV estratificado
+
+\begin{tabular}{lrr|lrr}
+\toprule
+Classe & N & \% & Classe & Precisao & Recall \\
+\midrule
+ALTA\_COMPLEXA & 1,673 & 13.1\% & ALTA\_NORMAL & 0.76 & 0.93 \\
+OBITO & 1,616 & 12.6\% & TRANSFERENCIA & 0.00 & 0.00 \\
+\bottomrule
+\end{tabular}
+
+\vspace{4pt}\noindent\textbf{Top-10 features por importancia:}
+
+\begin{tabular}{llr}
+\toprule
+Feature & Semantica & Importancia \\
+\midrule
+cid\_code\_enc & cid\_code\_enc & 1999.0 \\
+emb[37] & dim37 & 994.6 \\
+emb[5] & dim5 & 966.8 \\
+emb[50] & dim50 & 964.4 \\
+emb[44] & dim44 & 963.6 \\
+emb[46] & temporal trajectory & 958.6 \\
+emb[19] & dim19 & 957.0 \\
+emb[16] & billing pattern & 949.0 \\
+emb[9] & dim9 & 937.4 \\
+emb[48] & dim48 & 936.8 \\
+\bottomrule
+\end{tabular}
+
+\vspace{4pt}\noindent\textit{Em GHO-INTERMEDICA, os principais preditores de desfecho sao: CID de admissao, embedding dim[37] (dim37), embedding dim[5] (dim5). Obito representa 12.6\% das saidas (1616 casos no conjunto de treino/validacao). O modelo identifica obito com precisao=0.34 e recall=0.16 (macro-AUC reportado acima).}
+
+\subsection{GHO-IPASGO}
+\textcolor{red}{Erro: Only 26 eligible rows (< 100)}
+
+\subsection{GHO-KLINI}
+\textcolor{red}{Erro: Smallest class has 1 samples — need >= 2 for CV}
+
+\subsection{GHO-MEDTOUR}
+\textbf{n=1,198} internacoes com desfecho $\cdot$ \textbf{macro-AUC: 0.548} $\cdot$ 5-fold CV estratificado
+
+\begin{tabular}{lrr|lrr}
+\toprule
+Classe & N & \% & Classe & Precisao & Recall \\
+\midrule
+ALTA\_COMPLEXA & 5 & 0.4\% & ALTA\_NORMAL & 0.96 & 1.00 \\
+OBITO & 37 & 3.1\% & TRANSFERENCIA & 0.00 & 0.00 \\
+\bottomrule
+\end{tabular}
+
+\vspace{4pt}\noindent\textbf{Top-10 features por importancia:}
+
+\begin{tabular}{llr}
+\toprule
+Feature & Semantica & Importancia \\
+\midrule
+cid\_code\_enc & cid\_code\_enc & 165.4 \\
+emb[22] & dim22 & 136.2 \\
+emb[34] & dim34 & 129.6 \\
+emb[53] & glosa risk & 116.2 \\
+emb[16] & billing pattern & 109.6 \\
+emb[40] & dim40 & 107.2 \\
+emb[12] & dim12 & 102.6 \\
+emb[1] & dim1 & 100.8 \\
+emb[41] & dim41 & 98.2 \\
+emb[29] & dim29 & 97.2 \\
+\bottomrule
+\end{tabular}
+
+\vspace{4pt}\noindent\textit{Em GHO-MEDTOUR, os principais preditores de desfecho sao: CID de admissao, embedding dim[22] (dim22), embedding dim[34] (dim34). Obito representa 3.1\% das saidas (37 casos no conjunto de treino/validacao). O modelo identifica obito com precisao=0.00 e recall=0.00 (macro-AUC reportado acima).}
+
+\subsection{GHO-METRUS}
+\textbf{n=842} internacoes com desfecho $\cdot$ \textbf{macro-AUC: 0.570} $\cdot$ 2-fold CV estratificado
+
+\begin{tabular}{lrr|lrr}
+\toprule
+Classe & N & \% & Classe & Precisao & Recall \\
+\midrule
+ALTA\_COMPLEXA & 84 & 10.0\% & ALTA\_NORMAL & 0.86 & 0.97 \\
+OBITO & 32 & 3.8\% & TRANSFERENCIA & 0.00 & 0.00 \\
+\bottomrule
+\end{tabular}
+
+\vspace{4pt}\noindent\textbf{Top-10 features por importancia:}
+
+\begin{tabular}{llr}
+\toprule
+Feature & Semantica & Importancia \\
+\midrule
+cid\_code\_enc & cid\_code\_enc & 169.5 \\
+emb[19] & dim19 & 113.0 \\
+emb[36] & dim36 & 102.5 \\
+emb[62] & dim62 & 100.0 \\
+emb[23] & dim23 & 95.5 \\
+emb[47] & dim47 & 93.0 \\
+prior\_admissions & prior\_admissions & 89.5 \\
+emb[40] & dim40 & 85.5 \\
+emb[43] & dim43 & 84.5 \\
+emb[57] & dim57 & 82.0 \\
+\bottomrule
+\end{tabular}
+
+\vspace{4pt}\noindent\textit{Em GHO-METRUS, os principais preditores de desfecho sao: CID de admissao, embedding dim[19] (dim19), embedding dim[36] (dim36). Obito representa 3.8\% das saidas (32 casos no conjunto de treino/validacao). O modelo identifica obito com precisao=0.00 e recall=0.00 (macro-AUC reportado acima).}
+
+\subsection{GHO-PETROBRAS}
+\textbf{n=102,934} internacoes com desfecho $\cdot$ \textbf{macro-AUC: 0.733} $\cdot$ 5-fold CV estratificado
+
+\begin{tabular}{lrr|lrr}
+\toprule
+Classe & N & \% & Classe & Precisao & Recall \\
+\midrule
+ALTA\_COMPLEXA & 6,137 & 6.0\% & ALTA\_NORMAL & 0.94 & 0.83 \\
+OBITO & 5,208 & 5.1\% & TRANSFERENCIA & 0.03 & 0.00 \\
+\bottomrule
+\end{tabular}
+
+\vspace{4pt}\noindent\textbf{Top-10 features por importancia:}
+
+\begin{tabular}{llr}
+\toprule
+Feature & Semantica & Importancia \\
+\midrule
+cid\_code\_enc & cid\_code\_enc & 1626.2 \\
+emb[25] & dim25 & 1176.6 \\
+emb[55] & dim55 & 1161.2 \\
+emb[37] & dim37 & 1158.2 \\
+emb[34] & dim34 & 1154.8 \\
+emb[21] & dim21 & 1152.8 \\
+emb[29] & dim29 & 1151.4 \\
+emb[33] & dim33 & 1137.2 \\
+emb[59] & dim59 & 1137.0 \\
+emb[11] & dim11 & 1135.6 \\
+\bottomrule
+\end{tabular}
+
+\vspace{4pt}\noindent\textit{Em GHO-PETROBRAS, os principais preditores de desfecho sao: CID de admissao, embedding dim[25] (dim25), embedding dim[55] (dim55). Obito representa 5.1\% das saidas (5208 casos no conjunto de treino/validacao). O modelo identifica obito com precisao=0.12 e recall=0.21 (macro-AUC reportado acima).}
+
+\subsection{GHO-PINDAMONHANGABA}
+\textbf{n=1,548} internacoes com desfecho $\cdot$ \textbf{macro-AUC: 0.747} $\cdot$ 5-fold CV estratificado
+
+\begin{tabular}{lrr|lrr}
+\toprule
+Classe & N & \% & Classe & Precisao & Recall \\
+\midrule
+ALTA\_COMPLEXA & 53 & 3.4\% & ALTA\_NORMAL & 0.92 & 0.99 \\
+OBITO & 60 & 3.9\% & TRANSFERENCIA & 0.00 & 0.00 \\
+\bottomrule
+\end{tabular}
+
+\vspace{4pt}\noindent\textbf{Top-10 features por importancia:}
+
+\begin{tabular}{llr}
+\toprule
+Feature & Semantica & Importancia \\
+\midrule
+cid\_code\_enc & cid\_code\_enc & 332.4 \\
+emb[1] & dim1 & 212.2 \\
+emb[21] & dim21 & 175.8 \\
+emb[37] & dim37 & 164.4 \\
+emb[39] & dim39 & 157.0 \\
+emb[63] & dim63 & 154.0 \\
+emb[20] & dim20 & 153.2 \\
+emb[14] & dim14 & 146.4 \\
+emb[4] & dim4 & 142.2 \\
+emb[51] & dim51 & 140.4 \\
+\bottomrule
+\end{tabular}
+
+\vspace{4pt}\noindent\textit{Em GHO-PINDAMONHANGABA, os principais preditores de desfecho sao: CID de admissao, embedding dim[1] (dim1), embedding dim[21] (dim21). Obito representa 3.9\% das saidas (60 casos no conjunto de treino/validacao). O modelo identifica obito com precisao=0.19 e recall=0.07 (macro-AUC reportado acima).}
+
+\subsection{GHO-PORTOSEGURO}
+\textbf{n=2,190} internacoes com desfecho $\cdot$ \textbf{macro-AUC: 0.745} $\cdot$ 5-fold CV estratificado
+
+\begin{tabular}{lrr|lrr}
+\toprule
+Classe & N & \% & Classe & Precisao & Recall \\
+\midrule
+ALTA\_COMPLEXA & 18 & 0.8\% & ALTA\_NORMAL & 0.98 & 1.00 \\
+OBITO & 9 & 0.4\% & TRANSFERENCIA & 0.00 & 0.00 \\
+\bottomrule
+\end{tabular}
+
+\vspace{4pt}\noindent\textbf{Top-10 features por importancia:}
+
+\begin{tabular}{llr}
+\toprule
+Feature & Semantica & Importancia \\
+\midrule
+cid\_code\_enc & cid\_code\_enc & 140.8 \\
+emb[20] & dim20 & 112.4 \\
+emb[40] & dim40 & 95.2 \\
+emb[37] & dim37 & 95.0 \\
+emb[33] & dim33 & 92.6 \\
+fl\_urgencia & fl\_urgencia & 89.2 \\
+emb[24] & dim24 & 82.6 \\
+emb[14] & dim14 & 80.2 \\
+emb[5] & dim5 & 80.0 \\
+admission\_month & admission\_month & 79.2 \\
+\bottomrule
+\end{tabular}
+
+\vspace{4pt}\noindent\textit{Em GHO-PORTOSEGURO, os principais preditores de desfecho sao: CID de admissao, embedding dim[20] (dim20), embedding dim[40] (dim40). Obito representa 0.4\% das saidas (9 casos no conjunto de treino/validacao). O modelo identifica obito com precisao=0.00 e recall=0.00 (macro-AUC reportado acima).}
+
+\subsection{GHO-POSTAL}
+\textbf{n=1,782} internacoes com desfecho $\cdot$ \textbf{macro-AUC: 0.596} $\cdot$ 5-fold CV estratificado
+
+\begin{tabular}{lrr|lrr}
+\toprule
+Classe & N & \% & Classe & Precisao & Recall \\
+\midrule
+ALTA\_COMPLEXA & 31 & 1.7\% & ALTA\_NORMAL & 0.93 & 1.00 \\
+OBITO & 83 & 4.7\% & TRANSFERENCIA & 0.00 & 0.00 \\
+\bottomrule
+\end{tabular}
+
+\vspace{4pt}\noindent\textbf{Top-10 features por importancia:}
+
+\begin{tabular}{llr}
+\toprule
+Feature & Semantica & Importancia \\
+\midrule
+cid\_code\_enc & cid\_code\_enc & 384.6 \\
+emb[0] & dim0 & 217.0 \\
+emb[50] & dim50 & 207.4 \\
+emb[25] & dim25 & 198.2 \\
+emb[37] & dim37 & 192.4 \\
+emb[33] & dim33 & 182.8 \\
+emb[5] & dim5 & 173.6 \\
+emb[52] & dim52 & 170.2 \\
+emb[59] & dim59 & 169.0 \\
+emb[2] & dim2 & 165.4 \\
+\bottomrule
+\end{tabular}
+
+\vspace{4pt}\noindent\textit{Em GHO-POSTAL, os principais preditores de desfecho sao: CID de admissao, embedding dim[0] (dim0), embedding dim[50] (dim50). Obito representa 4.7\% das saidas (83 casos no conjunto de treino/validacao). O modelo identifica obito com precisao=0.00 e recall=0.00 (macro-AUC reportado acima).}
+
+\subsection{GHO-REALGRANDEZA}
+\textbf{n=4,521} internacoes com desfecho $\cdot$ \textbf{macro-AUC: 0.685} $\cdot$ 5-fold CV estratificado
+
+\begin{tabular}{lrr|lrr}
+\toprule
+Classe & N & \% & Classe & Precisao & Recall \\
+\midrule
+ALTA\_COMPLEXA & 315 & 7.0\% & ALTA\_NORMAL & 0.87 & 0.97 \\
+OBITO & 285 & 6.3\% & TRANSFERENCIA & 0.00 & 0.00 \\
+\bottomrule
+\end{tabular}
+
+\vspace{4pt}\noindent\textbf{Top-10 features por importancia:}
+
+\begin{tabular}{llr}
+\toprule
+Feature & Semantica & Importancia \\
+\midrule
+cid\_code\_enc & cid\_code\_enc & 593.6 \\
+prior\_admissions & prior\_admissions & 410.8 \\
+emb[4] & dim4 & 380.0 \\
+emb[26] & dim26 & 361.0 \\
+emb[1] & dim1 & 357.6 \\
+emb[57] & dim57 & 354.8 \\
+emb[51] & dim51 & 350.8 \\
+emb[10] & dim10 & 350.6 \\
+emb[0] & dim0 & 349.6 \\
+emb[11] & dim11 & 346.4 \\
+\bottomrule
+\end{tabular}
+
+\vspace{4pt}\noindent\textit{Em GHO-REALGRANDEZA, os principais preditores de desfecho sao: CID de admissao, admissoes anteriores, embedding dim[4] (dim4). Obito representa 6.3\% das saidas (285 casos no conjunto de treino/validacao). O modelo identifica obito com precisao=0.15 e recall=0.03 (macro-AUC reportado acima).}
+
+\subsection{GHO-SALUD}
+\textcolor{red}{Erro: Only 7 eligible rows (< 100)}
+
+\subsection{GHO-SAMI}
+\textbf{n=1,814} internacoes com desfecho $\cdot$ \textbf{macro-AUC: 0.586} $\cdot$ 5-fold CV estratificado
+
+\begin{tabular}{lrr|lrr}
+\toprule
+Classe & N & \% & Classe & Precisao & Recall \\
+\midrule
+ALTA\_COMPLEXA & 26 & 1.4\% & ALTA\_NORMAL & 0.98 & 1.00 \\
+OBITO & 9 & 0.5\% &  & --- & --- \\
+\bottomrule
+\end{tabular}
+
+\vspace{4pt}\noindent\textbf{Top-10 features por importancia:}
+
+\begin{tabular}{llr}
+\toprule
+Feature & Semantica & Importancia \\
+\midrule
+cid\_code\_enc & cid\_code\_enc & 213.6 \\
+emb[4] & dim4 & 128.0 \\
+emb[25] & dim25 & 125.6 \\
+emb[21] & dim21 & 104.2 \\
+prior\_admissions & prior\_admissions & 102.0 \\
+emb[55] & dim55 & 99.2 \\
+emb[5] & dim5 & 95.2 \\
+emb[46] & temporal trajectory & 93.0 \\
+emb[13] & dim13 & 87.8 \\
+emb[58] & dim58 & 86.4 \\
+\bottomrule
+\end{tabular}
+
+\vspace{4pt}\noindent\textit{Em GHO-SAMI, os principais preditores de desfecho sao: CID de admissao, embedding dim[4] (dim4), embedding dim[25] (dim25). Obito representa 0.5\% das saidas (9 casos no conjunto de treino/validacao). O modelo identifica obito com precisao=0.00 e recall=0.00 (macro-AUC reportado acima).}
+
+\subsection{GHO-SANTACASA}
+\textcolor{red}{Erro: Only 8 eligible rows (< 100)}
+
+\subsection{GHO-SANTACASA-STOS}
+\textcolor{red}{Erro: Smallest class has 1 samples — need >= 2 for CV}
+
+\subsection{GHO-SAOVICENTE}
+\textbf{n=3,068} internacoes com desfecho $\cdot$ \textbf{macro-AUC: 0.724} $\cdot$ 5-fold CV estratificado
+
+\begin{tabular}{lrr|lrr}
+\toprule
+Classe & N & \% & Classe & Precisao & Recall \\
+\midrule
+ALTA\_COMPLEXA & 106 & 3.5\% & ALTA\_NORMAL & 0.90 & 0.98 \\
+OBITO & 265 & 8.6\% &  & --- & --- \\
+\bottomrule
+\end{tabular}
+
+\vspace{4pt}\noindent\textbf{Top-10 features por importancia:}
+
+\begin{tabular}{llr}
+\toprule
+Feature & Semantica & Importancia \\
+\midrule
+cid\_code\_enc & cid\_code\_enc & 458.2 \\
+emb[14] & dim14 & 282.8 \\
+emb[49] & dim49 & 265.0 \\
+emb[38] & dim38 & 256.0 \\
+prior\_admissions & prior\_admissions & 250.0 \\
+emb[25] & dim25 & 242.2 \\
+emb[8] & dim8 & 240.0 \\
+emb[7] & dim7 & 239.4 \\
+emb[35] & dim35 & 237.8 \\
+emb[52] & dim52 & 234.0 \\
+\bottomrule
+\end{tabular}
+
+\vspace{4pt}\noindent\textit{Em GHO-SAOVICENTE, os principais preditores de desfecho sao: CID de admissao, embedding dim[14] (dim14), embedding dim[49] (dim49). Obito representa 8.6\% das saidas (265 casos no conjunto de treino/validacao). O modelo identifica obito com precisao=0.34 e recall=0.10 (macro-AUC reportado acima).}
+
+\subsection{GHO-SJ-RIOPRETO}
+\textbf{n=331} internacoes com desfecho $\cdot$ \textbf{macro-AUC: 0.371} $\cdot$ 3-fold CV estratificado
+
+\begin{tabular}{lrr|lrr}
+\toprule
+Classe & N & \% & Classe & Precisao & Recall \\
+\midrule
+ALTA\_COMPLEXA & 3 & 0.9\% & ALTA\_NORMAL & 0.98 & 1.00 \\
+OBITO & 4 & 1.2\% &  & --- & --- \\
+\bottomrule
+\end{tabular}
+
+\vspace{4pt}\noindent\textbf{Top-10 features por importancia:}
+
+\begin{tabular}{llr}
+\toprule
+Feature & Semantica & Importancia \\
+\midrule
+emb[52] & dim52 & 101.0 \\
+cid\_code\_enc & cid\_code\_enc & 91.3 \\
+emb[62] & dim62 & 48.7 \\
+emb[25] & dim25 & 42.0 \\
+admission\_dow & admission\_dow & 39.7 \\
+emb[31] & dim31 & 39.3 \\
+emb[60] & dim60 & 31.0 \\
+emb[53] & glosa risk & 28.7 \\
+emb[2] & dim2 & 27.0 \\
+emb[56] & dim56 & 27.0 \\
+\bottomrule
+\end{tabular}
+
+\vspace{4pt}\noindent\textit{Em GHO-SJ-RIOPRETO, os principais preditores de desfecho sao: embedding dim[52] (dim52), CID de admissao, embedding dim[62] (dim62). Obito representa 1.2\% das saidas (4 casos no conjunto de treino/validacao). O modelo identifica obito com precisao=0.00 e recall=0.00 (macro-AUC reportado acima).}
+
+\subsection{GHO-SULAMERICA}
+\textbf{n=5,588} internacoes com desfecho $\cdot$ \textbf{macro-AUC: 0.658} $\cdot$ 5-fold CV estratificado
+
+\begin{tabular}{lrr|lrr}
+\toprule
+Classe & N & \% & Classe & Precisao & Recall \\
+\midrule
+ALTA\_COMPLEXA & 270 & 4.8\% & ALTA\_NORMAL & 0.93 & 0.99 \\
+OBITO & 124 & 2.2\% & TRANSFERENCIA & 0.00 & 0.00 \\
+\bottomrule
+\end{tabular}
+
+\vspace{4pt}\noindent\textbf{Top-10 features por importancia:}
+
+\begin{tabular}{llr}
+\toprule
+Feature & Semantica & Importancia \\
+\midrule
+cid\_code\_enc & cid\_code\_enc & 753.8 \\
+admission\_month & admission\_month & 354.4 \\
+emb[13] & dim13 & 354.2 \\
+emb[39] & dim39 & 349.2 \\
+emb[33] & dim33 & 334.8 \\
+emb[8] & dim8 & 321.0 \\
+emb[0] & dim0 & 309.6 \\
+emb[34] & dim34 & 308.0 \\
+emb[45] & dim45 & 304.4 \\
+emb[61] & operational pattern & 297.4 \\
+\bottomrule
+\end{tabular}
+
+\vspace{4pt}\noindent\textit{Em GHO-SULAMERICA, os principais preditores de desfecho sao: CID de admissao, admission\_month, embedding dim[13] (dim13). Obito representa 2.2\% das saidas (124 casos no conjunto de treino/validacao). O modelo identifica obito com precisao=0.00 e recall=0.00 (macro-AUC reportado acima).}
+
+\subsection{GHO-UNIMEDSANTOS}
+\textbf{n=70,857} internacoes com desfecho $\cdot$ \textbf{macro-AUC: 0.688} $\cdot$ 5-fold CV estratificado
+
+\begin{tabular}{lrr|lrr}
+\toprule
+Classe & N & \% & Classe & Precisao & Recall \\
+\midrule
+ALTA\_COMPLEXA & 2,726 & 3.8\% & ALTA\_NORMAL & 0.94 & 0.92 \\
+OBITO & 2,995 & 4.2\% & TRANSFERENCIA & 0.00 & 0.00 \\
+\bottomrule
+\end{tabular}
+
+\vspace{4pt}\noindent\textbf{Top-10 features por importancia:}
+
+\begin{tabular}{llr}
+\toprule
+Feature & Semantica & Importancia \\
+\midrule
+cid\_code\_enc & cid\_code\_enc & 2176.8 \\
+emb[22] & dim22 & 1188.0 \\
+emb[48] & dim48 & 1159.6 \\
+emb[23] & dim23 & 1153.6 \\
+emb[59] & dim59 & 1152.6 \\
+emb[56] & dim56 & 1149.6 \\
+emb[63] & dim63 & 1147.6 \\
+emb[33] & dim33 & 1144.0 \\
+emb[46] & temporal trajectory & 1140.0 \\
+emb[36] & dim36 & 1129.6 \\
+\bottomrule
+\end{tabular}
+
+\vspace{4pt}\noindent\textit{Em GHO-UNIMEDSANTOS, os principais preditores de desfecho sao: CID de admissao, embedding dim[22] (dim22), embedding dim[48] (dim48). Obito representa 4.2\% das saidas (2995 casos no conjunto de treino/validacao). O modelo identifica obito com precisao=0.22 e recall=0.21 (macro-AUC reportado acima).}
+
+\subsection{GHO-UNIMEDSOROCABA}
+\textcolor{red}{Erro: Only 3 eligible rows (< 100)}
+
+\subsection{GHO-UNIMEDVITORIA2}
+\textbf{n=9,533} internacoes com desfecho $\cdot$ \textbf{macro-AUC: 0.630} $\cdot$ 5-fold CV estratificado
+
+\begin{tabular}{lrr|lrr}
+\toprule
+Classe & N & \% & Classe & Precisao & Recall \\
+\midrule
+ALTA\_COMPLEXA & 421 & 4.4\% & ALTA\_NORMAL & 0.92 & 0.99 \\
+OBITO & 270 & 2.8\% & TRANSFERENCIA & 0.00 & 0.00 \\
+\bottomrule
+\end{tabular}
+
+\vspace{4pt}\noindent\textbf{Top-10 features por importancia:}
+
+\begin{tabular}{llr}
+\toprule
+Feature & Semantica & Importancia \\
+\midrule
+cid\_code\_enc & cid\_code\_enc & 735.8 \\
+emb[6] & dim6 & 502.4 \\
+emb[35] & dim35 & 485.4 \\
+emb[16] & billing pattern & 480.0 \\
+emb[38] & dim38 & 460.4 \\
+emb[12] & dim12 & 457.8 \\
+emb[19] & dim19 & 456.8 \\
+emb[24] & dim24 & 456.8 \\
+emb[46] & temporal trajectory & 456.2 \\
+emb[63] & dim63 & 455.4 \\
+\bottomrule
+\end{tabular}
+
+\vspace{4pt}\noindent\textit{Em GHO-UNIMEDVITORIA2, os principais preditores de desfecho sao: CID de admissao, embedding dim[6] (dim6), embedding dim[35] (dim35). Obito representa 2.8\% das saidas (270 casos no conjunto de treino/validacao). O modelo identifica obito com precisao=0.13 e recall=0.01 (macro-AUC reportado acima).}
+
+\subsection{GHO-ZERRENNER}
+\textcolor{red}{Erro: Only 43 eligible rows (< 100)}
+
+\subsection{GOHOSP-CNU}
+\textbf{n=236,895} internacoes com desfecho $\cdot$ \textbf{macro-AUC: 0.760} $\cdot$ 5-fold CV estratificado
+
+\begin{tabular}{lrr|lrr}
+\toprule
+Classe & N & \% & Classe & Precisao & Recall \\
+\midrule
+ALTA\_COMPLEXA & 8,900 & 3.8\% & ALTA\_NORMAL & 0.97 & 0.81 \\
+OBITO & 5,043 & 2.1\% &  & --- & --- \\
+\bottomrule
+\end{tabular}
+
+\vspace{4pt}\noindent\textbf{Top-10 features por importancia:}
+
+\begin{tabular}{llr}
+\toprule
+Feature & Semantica & Importancia \\
+\midrule
+cid\_code\_enc & cid\_code\_enc & 1922.4 \\
+emb[40] & dim40 & 872.4 \\
+emb[1] & dim1 & 869.4 \\
+emb[55] & dim55 & 866.4 \\
+admission\_year & admission\_year & 863.2 \\
+emb[4] & dim4 & 862.6 \\
+emb[42] & dim42 & 857.6 \\
+emb[61] & operational pattern & 852.4 \\
+emb[15] & dim15 & 851.8 \\
+emb[20] & dim20 & 849.8 \\
+\bottomrule
+\end{tabular}
+
+\vspace{4pt}\noindent\textit{Em GOHOSP-CNU, os principais preditores de desfecho sao: CID de admissao, embedding dim[40] (dim40), embedding dim[1] (dim1). Obito representa 2.1\% das saidas (5043 casos no conjunto de treino/validacao). O modelo identifica obito com precisao=0.07 e recall=0.20 (macro-AUC reportado acima).}
+
+\subsection{PASA}
+\textbf{n=127,484} internacoes com desfecho $\cdot$ \textbf{macro-AUC: 0.734} $\cdot$ 5-fold CV estratificado
+
+\begin{tabular}{lrr|lrr}
+\toprule
+Classe & N & \% & Classe & Precisao & Recall \\
+\midrule
+ALTA\_COMPLEXA & 4,122 & 3.2\% & ALTA\_NORMAL & 0.97 & 0.88 \\
+OBITO & 3,012 & 2.4\% &  & --- & --- \\
+\bottomrule
+\end{tabular}
+
+\vspace{4pt}\noindent\textbf{Top-10 features por importancia:}
+
+\begin{tabular}{llr}
+\toprule
+Feature & Semantica & Importancia \\
+\midrule
+cid\_code\_enc & cid\_code\_enc & 1371.8 \\
+emb[1] & dim1 & 889.8 \\
+emb[29] & dim29 & 870.0 \\
+emb[43] & dim43 & 863.2 \\
+emb[56] & dim56 & 863.2 \\
+emb[19] & dim19 & 860.8 \\
+emb[49] & dim49 & 855.8 \\
+emb[32] & stay duration signal & 854.4 \\
+emb[0] & dim0 & 854.0 \\
+emb[48] & dim48 & 853.6 \\
+\bottomrule
+\end{tabular}
+
+\vspace{4pt}\noindent\textit{Em PASA, os principais preditores de desfecho sao: CID de admissao, embedding dim[1] (dim1), embedding dim[29] (dim29). Obito representa 2.4\% das saidas (3012 casos no conjunto de treino/validacao). O modelo identifica obito com precisao=0.09 e recall=0.16 (macro-AUC reportado acima).}
+
+\newpage
+\section{Parte 2 --- Clustering por Folhas do LightGBM (HDBSCAN)}
+Inovacao central: cada internacao e representada pelos seus indices de folha em cada arvore do LightGBM. Amostras na mesma folha compartilham exatamente o mesmo caminho de decisao. Aplicamos HDBSCAN sobre essa matriz de folhas para encontrar grupos semanticamente coerentes sem forcamos um $k$ pre-definido. Tamanho minimo de cluster: 50 internacoes. Pontos nao agrupados (outliers) sao reportados separadamente, nao distorcendo a analise.\par\noindent\textbf{Semaforo}: \textcolor{red}{\textbf{VERMELHO}} = obito $>5\%$ ou evasao $>3\%$; \textcolor{orange}{\textbf{AMARELO}} = alta complexa $>10\%$; \textcolor{green!60!black}{\textbf{VERDE}} = padrao normal.
+
+\section{Parte 3 --- Clustering por Embeddings Brutos (HDBSCAN)}
+Como comparacao e alternativa, aplicamos HDBSCAN diretamente sobre os embeddings de 64 dimensoes de cada internacao. Este metodo nao usa o LightGBM e pode capturar padroes geometricos no espaco de embeddings que o modelo supervisionado nao aprendeu. Tamanho minimo de cluster: 100 internacoes.
+
+\section{Parte 5 --- Resumo Cruzado entre Hospitais}
+\subsection{Dimensoes de Embedding mais Preditivas de Obito}
+Diferenca absoluta entre a media dos embeddings de internacoes com desfecho OBITO versus todos os outros desfechos (apenas internacoes com alta confirmada, IN\_SITUACAO=2). Dimensoes com maior delta separam melhor os casos fatais na admissao.
+
+Total analisado: 22,920 obitos vs 701,922 outros desfechos.
+
+\begin{tabular}{clr}
+\toprule
+Dim & Semantica & Delta medio \\
+\midrule
+emb[37] & dim37 & 0.0005 \\
+emb[10] & dim10 & 0.0003 \\
+emb[36] & dim36 & 0.0003 \\
+emb[24] & dim24 & 0.0003 \\
+emb[44] & dim44 & 0.0003 \\
+emb[25] & dim25 & 0.0002 \\
+emb[39] & dim39 & 0.0002 \\
+emb[1] & dim1 & 0.0002 \\
+emb[19] & dim19 & 0.0002 \\
+emb[45] & dim45 & 0.0002 \\
+\bottomrule
+\end{tabular}
+
+\subsection{CIDs com Maior Taxa de Obito (min 30 casos)}
+
+\begin{longtable}{llrrr}
+\toprule
+CID & Descricao & Total & Obitos & Taxa\% \\
+\midrule
+\endhead
+\rowcolor{yellow!10}ND & ND & 856 & 27 & 3.2\% \\
+\bottomrule
+\end{longtable}
+\subsection{Convenios com Maior Taxa de Evasao (min 50 casos)}
+
+\begin{tabular}{lrrr}
+\toprule
+Convenio ID & Total & Evasoes & Taxa\% \\
+\midrule
+\bottomrule
+\end{tabular}
+
+\end{document}

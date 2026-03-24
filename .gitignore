@@ -35,3 +35,22 @@ venv/
 *.swp
 *.swo
 *~
+
+# OS
+.DS_Store
+
+# Data & weights (large files)
+data/
+*.db
+*.pt
+*.parquet
+
+# Generated reports
+*.pdf
+*.aux
+*.log
+*.out
+*.toc
+
+# Lock files
+uv.lock

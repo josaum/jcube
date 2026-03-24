@@ -1,6 +1,6 @@
 """Smoke test for the example script."""
 
-from example import main
+from examples.basic_usage import main
 
 
 def test_main_does_not_raise():
