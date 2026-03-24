@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
 Modal script: JCUBE Admission-Discharge Analysis — v5
-Runs on Modal, loads V5 embeddings from jepa-cache volume,
+Runs on Modal, loads V6 embeddings from jepa-cache volume,
 queries DuckDB from jcube-data volume.
 
 Architecture: Supervised -> Extract -> Characterize
 
   Part 1 — Per-hospital LightGBM multiclass discharge prediction
       Target: ALTA_NORMAL / OBITO / ALTA_COMPLEXA / TRANSFERENCIA / EVASAO
-      Features: 64-dim V5 embedding + tabular (FL_INTER_URGENCIA, day_of_week,
+      Features: 128-dim V6 embedding + tabular (FL_INTER_URGENCIA, day_of_week,
                 month, prior_admission_count, convenio_encoded, cid_code_encoded)
       5-fold stratified CV, macro-AUC + per-class metrics
       Extract leaf indices: model.predict(X, pred_leaf=True)
@@ -40,7 +40,7 @@ Discharge type from:
   - Filter: IN_SITUACAO = 2 in agg_tb_capta_internacao_cain
 
 Output:
-  - LaTeX PDF at /data/reports/admission_discharge_report_v5_2026_03.pdf
+  - LaTeX PDF at /data/reports/admission_discharge_report_v6_2026_03.pdf
     pt-BR, UTF-8, professional, one section per hospital
 
 Usage:
@@ -94,10 +94,10 @@ analysis_image = (
 # ─────────────────────────────────────────────────────────────────
 
 GRAPH_PARQUET = "/data/jcube_graph.parquet"
-WEIGHTS_PATH  = "/cache/tkg-v5/node_emb_epoch_1.pt"
+WEIGHTS_PATH  = "/cache/tkg-v6/node_embeddings.pt"
 DB_PATH       = "/data/aggregated_fixed_union.db"
 OUTPUT_DIR    = "/data/reports"
-OUTPUT_PDF    = f"{OUTPUT_DIR}/admission_discharge_report_v5_2026_03.pdf"
+OUTPUT_PDF    = f"{OUTPUT_DIR}/admission_discharge_report_v6_2026_03.pdf"
 
 REPORT_DATE_STR = "2026-03-23"
 
@@ -326,7 +326,7 @@ def _load_internacao_embeddings():
     del table, subj, obj, all_nodes
     print(f"    {len(unique_nodes):,} unique nodes  ({time.time()-t0:.1f}s)")
 
-    print("[1/7] Loading V5 embeddings ...")
+    print("[1/7] Loading V6 embeddings ...")
     t1    = time.time()
     state = torch.load(WEIGHTS_PATH, map_location="cpu", weights_only=True)
     if isinstance(state, torch.Tensor):
@@ -1575,7 +1575,7 @@ def _gen_latex(
     lines.append(r"""
 \begin{center}
 {\LARGE \textbf{Analise de Admissao e Alta Hospitalar}}\\[4pt]
-{\large JCUBE -- Embeddings V5 Graph-JEPA + LightGBM + HDBSCAN}\\[2pt]
+{\large JCUBE -- Embeddings V6 Graph-JEPA + LightGBM + HDBSCAN}\\[2pt]
 {\normalsize """ + REPORT_DATE_STR + r"""}
 \end{center}
 \vspace{6pt}
@@ -1646,7 +1646,7 @@ def _gen_latex(
     lines.append(
         f"Este relatorio analisa {n_total:,} internacoes com alta confirmada "
         f"(\\texttt{{IN\\_SITUACAO=2}}) em {len(hospitals)} hospitais, "
-        f"utilizando embeddings de 64 dimensoes treinados com Graph-JEPA V5 "
+        f"utilizando embeddings de 128 dimensoes treinados com Graph-JEPA V6 "
         f"(35,2M nos, epoch 2). "
         f"O tipo de alta real e obtido da ultima entrada em "
         r"\texttt{agg\_tb\_capta\_evo\_status\_caes}, "
@@ -1930,7 +1930,7 @@ def _gen_latex(
     lines.append(r"\section{Parte 3 --- Clustering por Embeddings Brutos (HDBSCAN)}")
     lines.append(
         r"Como comparacao e alternativa, aplicamos HDBSCAN diretamente sobre os "
-        r"embeddings de 64 dimensoes de cada internacao. Este metodo nao usa o "
+        r"embeddings de 128 dimensoes de cada internacao. Este metodo nao usa o "
         r"LightGBM e pode capturar padroes geometricos no espaco de embeddings "
         r"que o modelo supervisionado nao aprendeu. "
         r"Tamanho minimo de cluster: " + str(HDBSCAN_MIN_CLUSTER_SIZE_EMB) + r" internacoes."
@@ -2089,7 +2089,7 @@ def run_analysis():
 
     t_global = time.time()
     print("=" * 70)
-    print("JCUBE Admission-Discharge Analysis V5")
+    print("JCUBE Admission-Discharge Analysis V6")
     print(f"Date: {REPORT_DATE_STR}")
     print("Architecture: LightGBM -> Leaf HDBSCAN -> Embedding HDBSCAN -> Report")
     print("=" * 70)

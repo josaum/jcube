@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Modal script: JCUBE V5 Anomaly Report Generator
-Runs on Modal, loads 8.4GB V5 embeddings from jepa-cache volume,
+Modal script: JCUBE V6 Anomaly Report Generator
+Runs on Modal, loads 8.4GB V6 embeddings from jepa-cache volume,
 queries DuckDB from jcube-data volume, generates LaTeX -> PDF.
 
 Key features (V5):
@@ -63,10 +63,10 @@ report_image = (
 # ─────────────────────────────────────────────────────────────────
 
 GRAPH_PARQUET  = "/data/jcube_graph.parquet"
-WEIGHTS_PATH   = "/cache/tkg-v5/node_emb_epoch_1.pt"
+WEIGHTS_PATH   = "/cache/tkg-v6/node_embeddings.pt"
 DB_PATH        = "/data/aggregated_fixed_union.db"
 OUTPUT_DIR     = "/data/reports"
-OUTPUT_PDF     = f"{OUTPUT_DIR}/anomaly_report_v5_2026_03.pdf"
+OUTPUT_PDF     = f"{OUTPUT_DIR}/anomaly_report_v6_2026_03.pdf"
 
 REPORT_DATE_STR = "2026-03-23"
 START_DATE_STR  = "2026-02-21"
@@ -187,7 +187,7 @@ def _load_twin():
     n_nodes = len(unique_nodes)
     print(f"    {n_nodes:,} unique nodes in {time.time()-t0:.1f}s")
 
-    print("[1/6] Loading V5 embedding weights ...")
+    print("[1/6] Loading V6 embedding weights ...")
     t1 = time.time()
     state = torch.load(WEIGHTS_PATH, map_location="cpu", weights_only=True)
     if isinstance(state, torch.Tensor):
@@ -210,7 +210,7 @@ def _load_twin():
     internacao_mask = np.array(
         ["/ID_CD_INTERNACAO_" in str(n) for n in unique_nodes], dtype=bool
     )
-    print(f"    INTERNACAO nodes (V4 prefixed): {internacao_mask.sum():,}")
+    print(f"    INTERNACAO nodes (V6 prefixed): {internacao_mask.sum():,}")
     return unique_nodes, embeddings, node_to_idx, internacao_mask
 
 
@@ -1081,7 +1081,7 @@ def _generate_latex(admissions: list[dict], similar_map: dict,
 \titleformat{\section}{\large\bfseries\color{jcubeblue}}{\thesection}{1em}{}[\titlerule]
 \titleformat{\subsection}{\normalsize\bfseries\color{darkblue}}{\thesubsection}{1em}{}
 
-\hypersetup{colorlinks=true,linkcolor=jcubeblue,pdftitle={JCUBE V5 Relatorio de Anomalias}}
+\hypersetup{colorlinks=true,linkcolor=jcubeblue,pdftitle={JCUBE V6 Relatorio de Anomalias}}
 
 \begin{document}
 \setlength{\parindent}{0pt}
@@ -1096,7 +1096,7 @@ def _generate_latex(admissions: list[dict], similar_map: dict,
 {\large\textcolor{jcubegray}{Digital Twin Analytics Platform --- Modelo V5}}\\[1.2cm]
 \begin{tcolorbox}[colback=jcubeblue,colframe=jcubeblue,coltext=white,width=0.92\textwidth,halign=center]
 {\LARGE\bfseries Relatorio de Anomalias em Internacoes}\\[0.3cm]
-{\large Analise via Embeddings do Gemeo Digital --- Graph-JEPA V5 (35,2M nos $\times$ 64 dim)}\\[0.2cm]
+{\large Analise via Embeddings do Gemeo Digital --- Graph-JEPA V6 (35,2M nos $\times$ 128 dim)}\\[0.2cm]
 {\normalsize Com Interpretacao de Negocio e Recomendacoes por Internacao}
 \end{tcolorbox}
 \vspace{0.8cm}
@@ -1567,8 +1567,8 @@ Maior z: \textbf{""" + f"{max_z:.2f}" + r"""} \\
     L.append(r"\section*{Apendice: Metodologia de Deteccao e Interpretacao}")
     L.append(r"\addcontentsline{toc}{section}{Apendice: Metodologia}")
     L.append(r"""
-\subsection*{1. Modelo Graph-JEPA V5}
-O modelo \textit{Graph-JEPA V5} foi treinado sobre o grafo de conhecimento JCUBE com \textbf{35,2M nos}
+\subsection*{1. Modelo Graph-JEPA V6}
+O modelo \textit{Graph-JEPA V6} foi treinado sobre o grafo de conhecimento JCUBE com \textbf{35,2M nos}
 e \textbf{64 dimensoes} de embedding. Cada no representa uma entidade (internacao, paciente,
 fatura, medico, etc.) e as arestas representam relacoes entre elas.
 
@@ -1669,7 +1669,7 @@ def generate_report():
 
     t_start = time.time()
     print("=" * 70)
-    print("JCUBE V5 Anomaly Report Generator (Modal)")
+    print("JCUBE V6 Anomaly Report Generator (Modal)")
     print(f"Period : {START_DATE_STR} -> {REPORT_DATE_STR}")
     print(f"Weights: {WEIGHTS_PATH}")
     print(f"DB     : {DB_PATH}")
@@ -1718,7 +1718,7 @@ def generate_report():
     print(f"\nFinished in {elapsed:.1f}s")
     print(f"Report saved to Modal volume jcube-data at: {OUTPUT_PDF}")
     print("Download with:")
-    print(f"  modal volume get jcube-data reports/anomaly_report_v5_2026_03.pdf ./anomaly_report_v5_2026_03.pdf")
+    print(f"  modal volume get jcube-data reports/anomaly_report_v6_2026_03.pdf ./anomaly_report_v6_2026_03.pdf")
     return OUTPUT_PDF
 
 

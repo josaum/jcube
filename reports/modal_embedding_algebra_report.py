@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Modal script: JCUBE V5 Embedding Algebra Report
+Modal script: JCUBE V6 Embedding Algebra Report
 Showcases what you can compute purely from vector operations on the 35.2M x 64
 healthcare digital twin.
 
@@ -12,7 +12,7 @@ Sections:
   5. Entity Resolution (cross-hospital patient matching)
   6. "What If" Simulation Demo (vector arithmetic on real admissions)
 
-Output: LaTeX PDF at /data/reports/embedding_algebra_v5_2026_03.pdf
+Output: LaTeX PDF at /data/reports/embedding_algebra_v6_2026_03.pdf
 All text pt-BR, UTF-8, professional, one section per page.
 
 Usage:
@@ -65,10 +65,10 @@ report_image = (
 # ─────────────────────────────────────────────────────────────────
 
 GRAPH_PARQUET = "/data/jcube_graph.parquet"
-WEIGHTS_PATH  = "/cache/tkg-v5/node_emb_epoch_1.pt"
+WEIGHTS_PATH  = "/cache/tkg-v6/node_embeddings.pt"
 DB_PATH       = "/data/aggregated_fixed_union.db"
 OUTPUT_DIR    = "/data/reports"
-OUTPUT_PDF    = f"{OUTPUT_DIR}/embedding_algebra_v5_2026_03.pdf"
+OUTPUT_PDF    = f"{OUTPUT_DIR}/embedding_algebra_v6_2026_03.pdf"
 
 REPORT_DATE_STR = "2026-03-23"
 
@@ -179,7 +179,7 @@ def _load_twin():
     n_nodes = len(unique_nodes)
     print(f"    {n_nodes:,} unique nodes in {time.time()-t0:.1f}s")
 
-    print("[1/8] Loading V5 embedding weights ...")
+    print("[1/8] Loading V6 embedding weights ...")
     t1 = time.time()
     state = torch.load(WEIGHTS_PATH, map_location="cpu", weights_only=True)
     if isinstance(state, torch.Tensor):
@@ -1039,7 +1039,7 @@ def _generate_latex(
 \titleformat{\section}{\large\bfseries\color{jcubeblue}}{\thesection}{1em}{}[\titlerule]
 \titleformat{\subsection}{\normalsize\bfseries\color{darkblue}}{\thesubsection}{1em}{}
 
-\hypersetup{colorlinks=true,linkcolor=jcubeblue,pdftitle={JCUBE V5 Algebra de Embeddings}}
+\hypersetup{colorlinks=true,linkcolor=jcubeblue,pdftitle={JCUBE V6 Algebra de Embeddings}}
 
 \begin{document}
 \setlength{\parindent}{0pt}
@@ -1059,7 +1059,7 @@ def _generate_latex(
 \begin{tcolorbox}[colback=jcubeblue,colframe=jcubeblue,coltext=white,width=0.92\textwidth,halign=center]
 {\LARGE\bfseries Algebra de Embeddings}\\[0.3cm]
 {\large O que se pode computar puramente com operacoes vetoriais\\sobre o Gemeo Digital 35,2M $\times$ 64}\\[0.2cm]
-{\normalsize Graph-JEPA V5 --- Epoch 1}
+{\normalsize Graph-JEPA V6 --- Dense Temporal World Model}
 \end{tcolorbox}
 \vspace{0.8cm}
 """)
@@ -1092,7 +1092,7 @@ def _generate_latex(
 \vfill
 {\small\textcolor{jcubegray}{
 Metodologia: operacoes de algebra vetorial (centroides, diferencas, cossenos) sobre\\
-embeddings do Graph-JEPA V5 com 35,2M nos $\times$ 64 dimensoes\\
+embeddings do Graph-JEPA V6 com 35,2M nos $\times$ 128 dimensoes\\
 Sem modelos adicionais --- tudo e geometria do espaco latente
 }}
 \end{center}
@@ -1601,8 +1601,8 @@ mais similares --- sem nenhum modelo adicional, apenas algebra linear sobre o ge
     L.append(r"\section*{Apendice: Metodologia}")
     L.append(r"\addcontentsline{toc}{section}{Apendice: Metodologia}")
     L.append(r"""
-\subsection*{1. Modelo Graph-JEPA V5}
-O modelo \textit{Graph-JEPA V5} foi treinado sobre o grafo de conhecimento JCUBE com
+\subsection*{1. Modelo Graph-JEPA V6}
+O modelo \textit{Graph-JEPA V6} foi treinado sobre o grafo de conhecimento JCUBE com
 \textbf{35,2M nos} e \textbf{64 dimensoes} de embedding.
 Arquivo: \texttt{node\_emb\_epoch\_1.pt} (8,4 GB).
 
@@ -1703,7 +1703,7 @@ def generate_embedding_algebra_report():
 
     t_start = time.time()
     print("=" * 70)
-    print("JCUBE V5 Embedding Algebra Report Generator (Modal)")
+    print("JCUBE V6 Embedding Algebra Report Generator (Modal)")
     print(f"Weights  : {WEIGHTS_PATH}")
     print(f"Parquet  : {GRAPH_PARQUET}")
     print(f"DB       : {DB_PATH}")
@@ -1771,7 +1771,7 @@ def generate_embedding_algebra_report():
     print(f"\nFinished in {elapsed:.1f}s")
     print(f"Report saved to Modal volume jcube-data at: {OUTPUT_PDF}")
     print("Download with:")
-    print(f"  modal volume get jcube-data reports/embedding_algebra_v5_2026_03.pdf ./embedding_algebra_v5_2026_03.pdf")
+    print(f"  modal volume get jcube-data reports/embedding_algebra_v6_2026_03.pdf ./embedding_algebra_v6_2026_03.pdf")
     return OUTPUT_PDF
 
 

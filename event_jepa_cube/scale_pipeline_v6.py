@@ -158,6 +158,10 @@ class V6Config:
     num_workers: int = 4
     prefetch_factor: int = 2
 
+    # Single-hospital mode (filter subgraph at load time)
+    hospital_filter: str = ""  # e.g. "GHO-BRADESCO" — empty = all hospitals
+    tgn_from_epoch: int = 3  # override: set to 0 for single-hospital fast test
+
     # Logging
     log_every: int = 50
 
@@ -281,7 +285,7 @@ gpu_image_v6 = (
     )
     .pip_install("torch_geometric>=2.6")
     .pip_install(
-        "torch_scatter", "torch_sparse", "torch_cluster",
+        "torch_scatter", "torch_sparse", "torch_cluster",  # no pyg-lib (no wheel for torch 2.10)
         find_links="https://data.pyg.org/whl/torch-2.10.0+cu128.html",
     )
 )
@@ -1251,10 +1255,20 @@ class V6Trainer:
         import pyarrow.parquet as pq_mod
         import torch
 
-        print("Loading TKG from Parquet (V6 with numeric_value)...")
+        hospital = self.cfg.hospital_filter
+        label = f" [FILTER: {hospital}]" if hospital else ""
+        print(f"Loading TKG from Parquet (V6 with numeric_value){label}...")
         t0 = time.time()
 
         table = pq_mod.read_table(parquet_path)
+
+        # Single-hospital filter: keep only edges where subject OR object contains the hospital prefix
+        if hospital:
+            mask_s = pc_mod.match_substring(table.column("subject_id"), hospital)
+            mask_o = pc_mod.match_substring(table.column("object_id"), hospital)
+            table = table.filter(pc_mod.or_(mask_s, mask_o))
+            print(f"  Filtered to {hospital}: {table.num_rows:,} edges (from full graph)")
+
         self.n_edges = table.num_rows
         print(f"  {self.n_edges:,} edges loaded in {time.time() - t0:.1f}s")
 
@@ -1452,7 +1466,9 @@ class V6Trainer:
 
         warm_path = v5_emb_path if os.path.exists(v5_emb_path) else v5_emb_alt
 
-        if os.path.exists(warm_path):
+        if self.cfg.hospital_filter:
+            print(f"  Single-hospital mode — skipping V5 warm-start (different node vocab)")
+        elif os.path.exists(warm_path):
             print(f"  Loading V5 embeddings for warm-start from {warm_path}...")
             v5_state = torch.load(warm_path, weights_only=True)
 
@@ -1698,11 +1714,30 @@ class V6Trainer:
         self.scaler = torch.amp.GradScaler("cuda", enabled=cfg.use_amp)
 
     def _get_phase(self, epoch: int) -> CurriculumPhase:
-        """Return the current CurriculumPhase for the given epoch."""
+        """Return the current CurriculumPhase for the given epoch.
+
+        In single-hospital mode (hospital_filter set), overrides:
+        - TGN enabled from tgn_from_epoch (default 0 for fast test)
+        - node_sample_frac = 1.0 (small graph, no sampling needed)
+        """
         for phase in CURRICULUM_PHASES_V6:
             if phase.epoch_start <= epoch < phase.epoch_end:
-                return phase
-        return CURRICULUM_PHASES_V6[-1]
+                p = phase
+                break
+        else:
+            p = CURRICULUM_PHASES_V6[-1]
+
+        # Single-hospital override: TGN from epoch 0, 100% sampling
+        if self.cfg.hospital_filter:
+            p = CurriculumPhase(
+                name=p.name,
+                epoch_start=p.epoch_start,
+                epoch_end=p.epoch_end,
+                num_neighbors=p.num_neighbors,
+                tgn_enabled=(epoch >= self.cfg.tgn_from_epoch),
+                node_sample_frac=1.0,
+            )
+        return p
 
     def _create_loader(self, phase: CurriculumPhase) -> tuple[Any, Any]:
         """Create NeighborLoader with curriculum-appropriate hops."""
@@ -2042,6 +2077,9 @@ class V6Trainer:
         import torch
 
         ckpt_path = os.path.join(self.cfg.artifact_dir, "checkpoint_latest.pt")
+        if self.cfg.hospital_filter:
+            print(f"  Single-hospital mode ({self.cfg.hospital_filter}) — skipping checkpoint resume")
+            return
         if not os.path.exists(ckpt_path):
             print("  No checkpoint found, starting fresh")
             return
