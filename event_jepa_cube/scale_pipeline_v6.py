@@ -1741,10 +1741,18 @@ class V6Trainer:
             # Predict
             z_pred = self.predictor(context, dt)  # (B - shift, dim)
 
-            # Weighted loss: exponential decay for further predictions
-            weight = cfg.lookahead_decay ** k
-            step_loss = F.mse_loss(z_pred, shifted_target.detach())
-            total_loss = total_loss + weight * step_loss
+            # Continuous time decay: 7-day half-life
+            # Each node gets its own weight based on actual chronological gap,
+            # not array index. ICU events 10 min apart get ~1.0 weight;
+            # outpatient visits 6 months apart get ~0.0 weight.
+            half_life_sec = 7.0 * 86400.0  # 7 days
+            decay_rate = math.log(2) / half_life_sec
+            weights = torch.exp(-decay_rate * dt)  # (B - shift,)
+
+            # Per-node weighted MSE (unreduced then weighted)
+            step_loss = F.mse_loss(z_pred, shifted_target.detach(), reduction='none').mean(dim=-1)
+            weighted_loss = (weights * step_loss).mean()
+            total_loss = total_loss + weighted_loss
             n_terms += 1
 
         if n_terms > 0:
