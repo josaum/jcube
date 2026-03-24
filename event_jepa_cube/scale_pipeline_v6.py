@@ -33,9 +33,36 @@ import json
 import math
 import os
 import time
-from dataclasses import dataclass, field, asdict
-from pathlib import Path
-from typing import Any, Optional
+from dataclasses import asdict, dataclass
+from typing import TYPE_CHECKING, Any, TypedDict, cast
+
+import modal
+
+if TYPE_CHECKING:
+    import torch
+
+
+class MaterializeStats(TypedDict):
+    n_edges: int
+    edge_file_mb: float
+    edge_time_s: float
+    n_ontology_nodes: int
+    ontology_file_mb: float
+    ontology_time_s: float
+
+
+class TrainResult(TypedDict):
+    total_steps: int
+    final_loss: float | None
+    final_dense_loss: float | None
+    final_sigreg_loss: float | None
+    train_time_s: float
+    num_nodes: int
+    num_edges: int
+    num_predicates: int
+    latent_dim: int
+    epochs: int
+    gps_layers: int
 
 try:
     import duckdb
@@ -90,6 +117,9 @@ class V6Config:
     weight_decay: float = 0.01
     warmup_frac: float = 0.1
     grad_clip: float = 1.0
+    emb_lr_mult: float = 10.0
+    emb_momentum: float = 0.0
+    emb_weight_decay: float = 0.0
 
     # EMA
     ema_tau_start: float = 0.996
@@ -135,7 +165,7 @@ class V6Config:
         return json.dumps(asdict(self), indent=2)
 
     @classmethod
-    def from_json(cls, s: str) -> "V6Config":
+    def from_json(cls, s: str) -> V6Config:
         return cls(**json.loads(s))
 
 
@@ -159,12 +189,14 @@ CURRICULUM_PHASES_V6: list[CurriculumPhase] = [
         epoch_start=0, epoch_end=3,
         num_neighbors=[15, 10],
         tgn_enabled=False,
+        node_sample_frac=0.10,  # 10% of nodes → ~6.2K batches/epoch (was 62K)
     ),
     CurriculumPhase(
         name="temporal",
         epoch_start=3, epoch_end=10,
         num_neighbors=[15, 10, 5],
         tgn_enabled=True,
+        node_sample_frac=0.25,  # 25% of nodes → ~15.7K batches/epoch
     ),
 ]
 
@@ -212,8 +244,6 @@ NUMERIC_COLUMNS = {
 # ---------------------------------------------------------------------------
 # Modal infrastructure
 # ---------------------------------------------------------------------------
-
-import modal
 
 scale_app = modal.App("jcube-tkg-jepa-v6")
 
@@ -273,7 +303,7 @@ def materialize_remote(
     catalog_json: str,
     db_path: str = "/data/aggregated_fixed_union.db",
     output_path: str = "/data/jcube_graph_v6.parquet",
-) -> dict:
+) -> MaterializeStats:
     """Materialize edges inside Modal container.
 
     V6 change: adds numeric_value column to edges for xVal encoding.
@@ -282,6 +312,7 @@ def materialize_remote(
     """
     import json
     import time
+
     import duckdb
     import pyarrow.parquet as pq_local
 
@@ -365,6 +396,7 @@ def materialize_remote(
 
     # Materialize edges to Parquet
     import os
+    edge_time = 0.0
     if os.path.exists(output_path) and os.path.getsize(output_path) > 100_000_000:
         meta = pq_local.read_metadata(output_path)
         # Check if V6 schema (has numeric_value column)
@@ -375,7 +407,7 @@ def materialize_remote(
             print(f"  SKIP edges -- already materialized (V6): {meta.num_rows:,} edges ({file_mb:.1f} MB)")
             edge_time = 0.0
         else:
-            print(f"  Existing file lacks numeric_value column, re-materializing...")
+            print("  Existing file lacks numeric_value column, re-materializing...")
             os.remove(output_path)
             has_numeric = False
     else:
@@ -400,12 +432,12 @@ def materialize_remote(
     print("\nExtracting ontology node texts from dictionary tables...")
     t1 = time.time()
 
-    from collections import Counter as Ctr
-    fk_usage = Ctr()
+    fk_usage: dict[str, int] = {}
     for t in tables:
         for c in t.get("columns", []):
             if c["name"].startswith("ID_CD_"):
-                fk_usage[c["name"]] += 1
+                col_name = c["name"]
+                fk_usage[col_name] = fk_usage.get(col_name, 0) + 1
 
     ontology_queries = []
     for t in tables:
@@ -489,7 +521,7 @@ class BGEM3Encoder:
     """
 
     @modal.enter()
-    def load_model(self):
+    def load_model(self) -> None:
         import torch
         from transformers import AutoModel, AutoTokenizer
 
@@ -522,7 +554,7 @@ class BGEM3Encoder:
                 padding=True, truncation=True, max_length=max_length,
             ).to(self.device)
 
-            with torch.no_grad(), torch.amp.autocast("cuda", dtype=torch.bfloat16):
+            with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                 outputs = self.model(
                     input_ids=tokens["input_ids"],
                     attention_mask=tokens["attention_mask"],
@@ -542,7 +574,7 @@ class BGEM3Encoder:
 # ---------------------------------------------------------------------------
 
 
-def _build_nn_modules():
+def _build_nn_modules() -> dict[str, Any]:
     """Returns all nn.Module classes for V6. Called inside GPU context."""
     import torch
     import torch.nn as nn
@@ -632,7 +664,7 @@ def _build_nn_modules():
             self.bias = nn.Parameter(torch.zeros(dim))
             self.mean_scale = nn.Parameter(torch.ones(1))
 
-        def forward(self, x: torch.Tensor, batch: Optional[torch.Tensor] = None) -> torch.Tensor:
+        def forward(self, x: torch.Tensor, batch: torch.Tensor | None = None) -> torch.Tensor:
             if batch is None:
                 # Single graph — treat all nodes as one graph
                 mean = x.mean(dim=0, keepdim=True)
@@ -760,7 +792,7 @@ def _build_nn_modules():
             x: torch.Tensor,
             edge_index: torch.Tensor,
             edge_attr: torch.Tensor,
-            batch: Optional[torch.Tensor] = None,
+            batch: torch.Tensor | None = None,
         ) -> tuple[torch.Tensor, torch.Tensor]:
             # 1. Local MPNN (GatedGCN) with pre-norm + residual
             h_local = self.local_norm(x, batch)
@@ -810,6 +842,8 @@ def _build_nn_modules():
             self.mem_dim = mem_dim
             self.msg_dim = msg_dim
 
+            self.memory: torch.Tensor
+            self.last_update: torch.Tensor
             self.register_buffer(
                 "memory", torch.zeros(num_nodes, mem_dim), persistent=False
             )
@@ -823,7 +857,8 @@ def _build_nn_modules():
 
         def get_memory(self, node_ids: torch.Tensor, device: torch.device) -> torch.Tensor:
             """Gather memory for a batch of nodes. Returns (B, mem_dim) on device."""
-            return self.memory[node_ids.cpu()].to(device)
+            memory = cast(torch.Tensor, self.memory)
+            return memory[node_ids.cpu()].to(device)
 
         def compute_messages(
             self,
@@ -833,8 +868,9 @@ def _build_nn_modules():
             device: torch.device,
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
             """Compute messages for edges in batch."""
-            mem_src = self.memory[src_ids.cpu()].to(device)
-            mem_dst = self.memory[dst_ids.cpu()].to(device)
+            memory = cast(torch.Tensor, self.memory)
+            mem_src = memory[src_ids.cpu()].to(device)
+            mem_dst = memory[dst_ids.cpu()].to(device)
             msg_input = torch.cat([mem_src, mem_dst, edge_feat], dim=-1)
             messages = self.msg_fn(msg_input)
 
@@ -845,7 +881,13 @@ def _build_nn_modules():
 
             agg = torch.zeros(unique_nodes.size(0), self.msg_dim, device=device)
             # FIX: scatter_reduce_ to safely aggregate concurrent messages (avoid nondeterministic overwrite)
-            agg.scatter_reduce_(0, inverse.to(device).unsqueeze(-1).expand(-1, self.msg_dim), all_msgs, reduce="mean", include_self=False)
+            agg.scatter_reduce_(
+                0,
+                inverse.to(device).unsqueeze(-1).expand(-1, self.msg_dim),
+                all_msgs,
+                reduce="mean",
+                include_self=False,
+            )
 
             return unique_nodes, agg, messages
 
@@ -853,35 +895,44 @@ def _build_nn_modules():
             self,
             unique_nodes: torch.Tensor,
             agg_messages: torch.Tensor,
-            timestamps: Optional[torch.Tensor] = None,
-        ):
+            timestamps: torch.Tensor | None = None,
+        ) -> None:
             """Update memory for nodes in this batch using GRU."""
             device = agg_messages.device
-            old_mem = self.memory[unique_nodes.cpu()].to(device)
+            memory = cast(torch.Tensor, self.memory)
+            last_update = cast(torch.Tensor, self.last_update)
+            old_mem = memory[unique_nodes.cpu()].to(device)
             new_mem = self.gru(agg_messages, old_mem)
 
-            self.memory[unique_nodes.cpu()] = new_mem.detach().cpu()
+            memory[unique_nodes.cpu()] = new_mem.detach().cpu()
             if timestamps is not None:
-                self.last_update[unique_nodes.cpu()] = timestamps.cpu()
+                last_update[unique_nodes.cpu()] = timestamps.cpu()
 
-        def detach_memory(self):
+        def detach_memory(self) -> None:
             """Detach memory from computation graph (call between epochs)."""
-            self.memory.detach_()
+            memory = cast(torch.Tensor, self.memory)
+            memory.detach_()
 
-        def reset_memory(self):
+        def reset_memory(self) -> None:
             """Zero out all memory (for fresh start)."""
-            self.memory.zero_()
-            self.last_update.zero_()
+            memory = cast(torch.Tensor, self.memory)
+            last_update = cast(torch.Tensor, self.last_update)
+            memory.zero_()
+            last_update.zero_()
 
-        def state_for_checkpoint(self) -> dict:
+        def state_for_checkpoint(self) -> dict[str, torch.Tensor]:
+            memory = cast(torch.Tensor, self.memory)
+            last_update = cast(torch.Tensor, self.last_update)
             return {
-                "memory": self.memory.clone(),
-                "last_update": self.last_update.clone(),
+                "memory": memory.clone(),
+                "last_update": last_update.clone(),
             }
 
-        def load_checkpoint_state(self, state: dict):
-            self.memory.copy_(state["memory"])
-            self.last_update.copy_(state["last_update"])
+        def load_checkpoint_state(self, state: dict[str, torch.Tensor]) -> None:
+            memory = cast(torch.Tensor, self.memory)
+            last_update = cast(torch.Tensor, self.last_update)
+            memory.copy_(state["memory"])
+            last_update.copy_(state["last_update"])
 
     # ------------------------------------------------------------------
     # TemporalGPSEncoder — V6: edge_feat_dim=112 (pred 64 + time 16 + numeric 32)
@@ -896,7 +947,7 @@ def _build_nn_modules():
           - No LapPE (removed for simplification)
         """
 
-        def __init__(self, cfg: "V6Config", num_predicates: int):
+        def __init__(self, cfg: V6Config, num_predicates: int):
             super().__init__()
             self.cfg = cfg
             dim = cfg.latent_dim
@@ -942,11 +993,11 @@ def _build_nn_modules():
             x: torch.Tensor,
             edge_index: torch.Tensor,
             edge_attr_idx: torch.Tensor,
-            node_time: Optional[torch.Tensor] = None,
-            edge_time: Optional[torch.Tensor] = None,
-            edge_numeric: Optional[torch.Tensor] = None,
-            batch: Optional[torch.Tensor] = None,
-            rwse: Optional[torch.Tensor] = None,
+            node_time: torch.Tensor | None = None,
+            edge_time: torch.Tensor | None = None,
+            edge_numeric: torch.Tensor | None = None,
+            batch: torch.Tensor | None = None,
+            rwse: torch.Tensor | None = None,
         ) -> torch.Tensor:
             """Forward pass through the V6 GPS encoder.
 
@@ -1084,7 +1135,7 @@ def _build_nn_modules():
         L = sum(off_diag(cov(z))^2) / D
         """
 
-        def __init__(self):
+        def __init__(self) -> None:
             super().__init__()
 
         def forward(self, z: torch.Tensor) -> torch.Tensor:
@@ -1142,13 +1193,11 @@ class V6Trainer:
         parquet_path: str,
         ontology_path: str,
     ):
-        import copy
         import gc
         import random
 
         import numpy as np
         import torch
-        import torch.nn as nn
 
         self.cfg = cfg
         self.nn = nn_modules
@@ -1194,7 +1243,7 @@ class V6Trainer:
         gc.collect()
         torch.cuda.empty_cache()
 
-    def _load_graph(self, parquet_path: str):
+    def _load_graph(self, parquet_path: str) -> None:
         """Load the materialized TKG from Parquet with numeric values."""
         import numpy as np
         import pyarrow as pa_mod
@@ -1211,7 +1260,6 @@ class V6Trainer:
 
         # C++ fast path: PyArrow dictionary encoding
         print("  Dictionary encoding (C++)...")
-        t1 = time.time()
 
         subj = table.column("subject_id")
         obj = table.column("object_id")
@@ -1271,7 +1319,7 @@ class V6Trainer:
         import gc
         gc.collect()
 
-    def _build_vocab_cached(self):
+    def _build_vocab_cached(self) -> None:
         """Build node vocabulary, caching to volume."""
         import os
 
@@ -1290,11 +1338,12 @@ class V6Trainer:
             json.dump({"num_nodes": self.num_nodes, "num_predicates": self.num_predicates}, f)
         jepa_cache.commit()
 
-    def _encode_ontology_cached(self, ontology_path: str):
+    def _encode_ontology_cached(self, ontology_path: str) -> None:
         """Encode ontology texts with BGE-M3, with caching to volume."""
         import os
-        import torch
+
         import pyarrow.parquet as pq_mod
+        import torch
 
         cache_path = os.path.join(self.cfg.artifact_dir, "ontology_bge_embeddings.pt")
         cache_meta_path = os.path.join(self.cfg.artifact_dir, "ontology_bge_meta.json")
@@ -1353,7 +1402,7 @@ class V6Trainer:
                 padding=True, truncation=True, max_length=self.cfg.bge_max_length,
             ).to(self.device)
 
-            with torch.no_grad(), torch.amp.autocast("cuda", dtype=torch.bfloat16):
+            with torch.no_grad(), torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                 out = model(**tokens)
                 cls_emb = out.last_hidden_state[:, 0, :]
                 all_onto_embs.append(cls_emb.cpu().float())
@@ -1379,7 +1428,7 @@ class V6Trainer:
         torch.cuda.empty_cache()
         print("  BGE-M3 freed from VRAM")
 
-    def _init_embeddings(self):
+    def _init_embeddings(self) -> None:
         """Initialize node embedding table with V5 epoch 1 warm-start.
 
         V6 warm-start strategy:
@@ -1387,6 +1436,7 @@ class V6Trainer:
             Second 64 dims are "temporal slots" that TGN memory will fill.
         """
         import os
+
         import torch
         import torch.nn as nn
 
@@ -1495,7 +1545,7 @@ class V6Trainer:
         # (AdamW weight decay + momentum would otherwise drift frozen nodes)
         self.frozen_embs_cache = self.node_emb.weight[self.frozen_mask].detach().clone()
 
-    def _build_graph_data(self):
+    def _build_graph_data(self) -> None:
         """Build PyG Data object with numeric edge attribute."""
         import torch
         from torch_geometric.data import Data
@@ -1523,9 +1573,10 @@ class V6Trainer:
         self.unique_src = torch.unique(self.edge_index[0])
         print(f"  Nodes with outgoing edges: {self.unique_src.shape[0]:,}")
 
-    def _build_csr_cache(self):
+    def _build_csr_cache(self) -> None:
         """Pre-build CSR adjacency and cache to volume."""
         import os
+
         import torch
 
         csr_cache_path = os.path.join(self.cfg.artifact_dir, "csr_cache_v6.pt")
@@ -1550,11 +1601,9 @@ class V6Trainer:
         jepa_cache.commit()
         print(f"  CSR pre-built in {time.time() - t0:.1f}s")
 
-    def _create_models(self):
+    def _create_models(self) -> None:
         """Instantiate all V6 neural network models."""
         import copy
-        import torch
-        import torch.nn as nn
 
         cfg = self.cfg
         M = self.nn
@@ -1596,7 +1645,7 @@ class V6Trainer:
         n_onto_proj = sum(p.numel() for p in self.onto_projection.parameters())
 
         print(f"\n{'=' * 50}")
-        print(f"V6 Dense Temporal JEPA — Model Summary")
+        print("V6 Dense Temporal JEPA — Model Summary")
         print(f"{'=' * 50}")
         print(f"  Online encoder:     {n_encoder:,} params")
         print(f"  Predictor:          {n_predictor:,} params")
@@ -1607,25 +1656,44 @@ class V6Trainer:
         total_trainable = n_encoder + n_predictor + n_emb + n_tgn + n_onto_proj
         print(f"  Total trainable:    {total_trainable:,} params")
         print(f"  Loss:               L_dense_lookahead + {cfg.sigreg_lambda} * L_weak_sigreg")
-        print(f"  Curriculum:         2 phases (foundation, temporal)")
-        print(f"  Edge features:      pred({cfg.pred_emb_dim}) + time({cfg.time_dim}) + numeric({cfg.numeric_dim}) = {cfg.edge_feat_dim}")
+        print("  Curriculum:         2 phases (foundation, temporal)")
+        print(
+            "  Edge features:      "
+            f"pred({cfg.pred_emb_dim}) + time({cfg.time_dim}) + "
+            f"numeric({cfg.numeric_dim}) = {cfg.edge_feat_dim}"
+        )
 
-    def _create_optimizer(self):
-        """Create optimizer and AMP scaler."""
+    def _create_optimizer(self) -> None:
+        """Create split optimizers and AMP scaler.
+
+        The embedding table is too large for AdamW state at 128 dims:
+        35.2M x 128 parameters implies ~36 GB of optimizer buffers for
+        exp_avg and exp_avg_sq alone. Keep `node_emb` on plain SGD and
+        use AdamW only for the smaller neural modules.
+        """
         import torch
 
         cfg = self.cfg
-        trainable = (
-            list(self.node_emb.parameters())
-            + list(self.online_encoder.parameters())
+        self.emb_trainable = list(self.node_emb.parameters())
+        self.net_trainable = (
+            list(self.online_encoder.parameters())
             + list(self.predictor.parameters())
             + list(self.onto_projection.parameters())
             + list(self.tgn.msg_fn.parameters())
             + list(self.tgn.gru.parameters())
         )
-        self.trainable = trainable
-        self.optimizer = torch.optim.AdamW(
-            trainable, lr=cfg.lr, weight_decay=cfg.weight_decay
+        self.trainable = self.emb_trainable + self.net_trainable
+
+        self.optimizer_emb = torch.optim.SGD(
+            self.emb_trainable,
+            lr=cfg.lr * cfg.emb_lr_mult,
+            momentum=cfg.emb_momentum,
+            weight_decay=cfg.emb_weight_decay,
+        )
+        self.optimizer_net = torch.optim.AdamW(
+            self.net_trainable,
+            lr=cfg.lr,
+            weight_decay=cfg.weight_decay,
         )
         self.scaler = torch.amp.GradScaler("cuda", enabled=cfg.use_amp)
 
@@ -1636,7 +1704,7 @@ class V6Trainer:
                 return phase
         return CURRICULUM_PHASES_V6[-1]
 
-    def _create_loader(self, phase: CurriculumPhase):
+    def _create_loader(self, phase: CurriculumPhase) -> tuple[Any, Any]:
         """Create NeighborLoader with curriculum-appropriate hops."""
         import torch
         from torch_geometric.loader import NeighborLoader
@@ -1673,11 +1741,11 @@ class V6Trainer:
 
     def _compute_dense_lookahead_loss(
         self,
-        ctx_repr: "torch.Tensor",
-        ema_target: "torch.Tensor",
-        batch_node_time: "torch.Tensor",
+        ctx_repr: torch.Tensor,
+        ema_target: torch.Tensor,
+        batch_node_time: torch.Tensor,
         B: int,
-    ) -> "torch.Tensor":
+    ) -> torch.Tensor:
         """Compute Dense Temporal Lookahead loss.
 
         For each seed node i, predicts the EMA representation of future
@@ -1762,7 +1830,7 @@ class V6Trainer:
 
     def _train_step(
         self,
-        batch,
+        batch: Any,
         phase: CurriculumPhase,
         total_steps: int,
         total_expected_steps: int,
@@ -1774,7 +1842,6 @@ class V6Trainer:
         """
         import torch
         import torch.nn as nn
-        import torch.nn.functional as F
 
         cfg = self.cfg
         device = self.device
@@ -1784,13 +1851,15 @@ class V6Trainer:
 
         # LR schedule
         lr_mult = self._lr_schedule(total_steps, total_expected_steps)
-        for pg in self.optimizer.param_groups:
+        for pg in self.optimizer_net.param_groups:
             pg["lr"] = cfg.lr * lr_mult
+        for pg in self.optimizer_emb.param_groups:
+            pg["lr"] = cfg.lr * cfg.emb_lr_mult * lr_mult
 
         # AMP context
         amp_dtype = torch.bfloat16 if cfg.amp_dtype == "bfloat16" else torch.float16
 
-        with torch.cuda.amp.autocast(dtype=amp_dtype, enabled=cfg.use_amp):
+        with torch.autocast(device_type="cuda", dtype=amp_dtype, enabled=cfg.use_amp):
             # Get node features from embedding table
             x = self.node_emb(batch.x.to(device))  # (N_batch, 128)
 
@@ -1801,12 +1870,13 @@ class V6Trainer:
                 # Additive fusion: project TGN 64-dim to 128-dim latent space
                 # TGN memory fills the "temporal slots" of the embedding
                 if tgn_mem.shape[1] < cfg.latent_dim:
-                    tgn_pad = torch.zeros(
-                        tgn_mem.shape[0], cfg.latent_dim - tgn_mem.shape[1],
-                        device=device, dtype=tgn_mem.dtype,
-                    )
                     tgn_mem_full = torch.cat([
-                        torch.zeros(tgn_mem.shape[0], cfg.latent_dim - cfg.tgn_dim, device=device, dtype=tgn_mem.dtype),
+                        torch.zeros(
+                            tgn_mem.shape[0],
+                            cfg.latent_dim - cfg.tgn_dim,
+                            device=device,
+                            dtype=tgn_mem.dtype,
+                        ),
                         tgn_mem,
                     ], dim=-1)
                 else:
@@ -1861,11 +1931,13 @@ class V6Trainer:
             loss = dense_loss + cfg.sigreg_lambda * sigreg_loss
 
         # Backward with scaler
-        self.optimizer.zero_grad(set_to_none=True)
+        self.optimizer_emb.zero_grad(set_to_none=True)
+        self.optimizer_net.zero_grad(set_to_none=True)
         self.scaler.scale(loss).backward()
-        self.scaler.unscale_(self.optimizer)
-        nn.utils.clip_grad_norm_(self.trainable, cfg.grad_clip)
-        self.scaler.step(self.optimizer)
+        self.scaler.unscale_(self.optimizer_net)
+        nn.utils.clip_grad_norm_(self.net_trainable, cfg.grad_clip)
+        self.scaler.step(self.optimizer_emb)
+        self.scaler.step(self.optimizer_net)
         self.scaler.update()
 
         # FIX: Hard-reset frozen ontology nodes (zeroing grad is insufficient —
@@ -1919,7 +1991,7 @@ class V6Trainer:
         }
         return metrics
 
-    def _checkpoint(self, epoch: int):
+    def _checkpoint(self, epoch: int) -> None:
         """Full state checkpoint to Modal volume."""
         import torch
 
@@ -1929,7 +2001,8 @@ class V6Trainer:
         ckpt = {
             "epoch": epoch,
             "total_steps": self.total_steps,
-            "optimizer": self.optimizer.state_dict(),
+            "optimizer_emb": self.optimizer_emb.state_dict(),
+            "optimizer_net": self.optimizer_net.state_dict(),
             "scaler": self.scaler.state_dict(),
             "online_encoder": self.online_encoder.state_dict(),
             "target_encoder": self.target_encoder.state_dict(),
@@ -1964,7 +2037,7 @@ class V6Trainer:
         jepa_cache.commit()
         print(f"  Checkpoint saved: epoch {epoch + 1}")
 
-    def _resume_checkpoint(self):
+    def _resume_checkpoint(self) -> None:
         """Load and restore all state from checkpoint if available."""
         import torch
 
@@ -1973,7 +2046,7 @@ class V6Trainer:
             print("  No checkpoint found, starting fresh")
             return
 
-        print(f"  Resuming from checkpoint...")
+        print("  Resuming from checkpoint...")
         ckpt = torch.load(ckpt_path, weights_only=False)
 
         self.start_epoch = ckpt["epoch"] + 1
@@ -1993,7 +2066,11 @@ class V6Trainer:
         if "tgn_memory" in ckpt:
             self.tgn.load_checkpoint_state(ckpt["tgn_memory"])
 
-        self.optimizer.load_state_dict(ckpt["optimizer"])
+        if "optimizer_emb" in ckpt and "optimizer_net" in ckpt:
+            self.optimizer_emb.load_state_dict(ckpt["optimizer_emb"])
+            self.optimizer_net.load_state_dict(ckpt["optimizer_net"])
+        else:
+            print("  Legacy checkpoint optimizer state detected; reinitializing optimizers for SGD/AdamW split")
         self.scaler.load_state_dict(ckpt["scaler"])
 
         if "rng_cpu" in ckpt:
@@ -2003,10 +2080,8 @@ class V6Trainer:
 
         print(f"  Resumed from epoch {self.start_epoch}, step {self.total_steps}")
 
-    def train(self) -> dict:
+    def train(self) -> TrainResult:
         """Main training loop over epochs/batches with 2-phase curriculum."""
-        import torch
-
         cfg = self.cfg
 
         # Estimate total steps
@@ -2014,13 +2089,16 @@ class V6Trainer:
         total_expected_steps = cfg.epochs * steps_per_epoch
 
         print(f"\n{'=' * 60}")
-        print(f"V6 Dense Temporal JEPA Training")
+        print("V6 Dense Temporal JEPA Training")
         print(f"{'=' * 60}")
         print(f"  Nodes:          {self.num_nodes:,}")
         print(f"  Edges:          {self.n_edges:,}")
         print(f"  Predicates:     {self.num_predicates}")
         print(f"  Latent dim:     {cfg.latent_dim}")
-        print(f"  Edge feat dim:  {cfg.edge_feat_dim} (pred={cfg.pred_emb_dim} + time={cfg.time_dim} + num={cfg.numeric_dim})")
+        print(
+            f"  Edge feat dim:  {cfg.edge_feat_dim} "
+            f"(pred={cfg.pred_emb_dim} + time={cfg.time_dim} + num={cfg.numeric_dim})"
+        )
         print(f"  GPS layers:     {cfg.gps_layers}")
         print(f"  GPS heads:      {cfg.gps_heads}")
         print(f"  Batch size:     {cfg.batch_size}")
@@ -2030,7 +2108,7 @@ class V6Trainer:
         print(f"  AMP:            {cfg.use_amp} ({cfg.amp_dtype})")
         print(f"  Frozen onto:    {self.n_frozen:,}")
         print(f"  SIGReg lambda:  {cfg.sigreg_lambda}")
-        print(f"  Curriculum:     foundation (ep 0-2, no TGN) -> temporal (ep 3-9, TGN on)")
+        print("  Curriculum:     foundation (ep 0-2, no TGN) -> temporal (ep 3-9, TGN on)")
 
         t_train = time.time()
         current_phase_name = None
@@ -2124,7 +2202,7 @@ class V6Trainer:
             "gps_layers": self.cfg.gps_layers,
         }
 
-    def _save_final_artifacts(self, train_time: float):
+    def _save_final_artifacts(self, train_time: float) -> None:
         """Save final model artifacts."""
         import torch
 
@@ -2207,8 +2285,8 @@ class V6Trainer:
 def train_tkg_jepa_v6(
     parquet_path: str = "/data/jcube_graph_v6.parquet",
     ontology_path: str = "/data/ontology_nodes.parquet",
-    config_json: Optional[str] = None,
-) -> dict:
+    config_json: str | None = None,
+) -> TrainResult:
     """Train V6 Dense Temporal JEPA on the full TKG.
 
     Architecture: 3-layer GraphGPS + TGN + Dense Lookahead + Weak-SIGReg.
@@ -2255,7 +2333,7 @@ def main(
     action: str = "full",
     catalog_path: str = "data/ai_friendly_catalog.json",
     config: str = "",
-):
+) -> None:
     """V6 Dense Temporal JEPA pipeline (all heavy work on Modal).
 
     Actions:
@@ -2270,12 +2348,12 @@ def main(
         modal run event_jepa_cube/scale_pipeline_v6.py --action materialize
 
     Prerequisites:
-        - DB uploaded to Modal volume: modal volume put jcube-data data/aggregated_fixed_union.db /aggregated_fixed_union.db
+        - DB uploaded to Modal volume:
+          modal volume put jcube-data data/aggregated_fixed_union.db /aggregated_fixed_union.db
         - Catalog uploaded: modal volume put jcube-data data/ai_friendly_catalog.json /ai_friendly_catalog.json
     """
     import json
     import sys
-    import time
 
     sys.path.insert(0, ".")
 
@@ -2319,7 +2397,7 @@ def main(
         )
 
         print(f"\n{'=' * 60}")
-        print(f"RESULTS -- V6 Dense Temporal JEPA")
+        print("RESULTS -- V6 Dense Temporal JEPA")
         print(f"{'=' * 60}")
         print(f"  Steps:        {result['total_steps']:,}")
         print(f"  Final loss:   {result['final_loss']}")
