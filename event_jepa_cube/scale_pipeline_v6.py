@@ -189,14 +189,14 @@ CURRICULUM_PHASES_V6: list[CurriculumPhase] = [
         epoch_start=0, epoch_end=3,
         num_neighbors=[15, 10],
         tgn_enabled=False,
-        node_sample_frac=0.10,  # 10% of nodes → ~6.2K batches/epoch (was 62K)
+        node_sample_frac=0.02,  # 10% of nodes → ~6.2K batches/epoch (was 62K)
     ),
     CurriculumPhase(
         name="temporal",
         epoch_start=3, epoch_end=10,
         num_neighbors=[15, 10, 5],
         tgn_enabled=True,
-        node_sample_frac=0.25,  # 25% of nodes → ~15.7K batches/epoch
+        node_sample_frac=0.05,  # 25% of nodes → ~15.7K batches/epoch
     ),
 ]
 

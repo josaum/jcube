@@ -43,10 +43,16 @@ def run_probes():
     data_volume.reload()
 
     GRAPH = "/data/jcube_graph.parquet"
-    WEIGHTS = "/cache/tkg-v5/node_emb_epoch_1.pt"
+    # Auto-detect latest version: V6 (128-dim) > V5 (64-dim)
+    if os.path.exists("/cache/tkg-v6/node_embeddings.pt"):
+        WEIGHTS = "/cache/tkg-v6/node_embeddings.pt"
+    elif os.path.exists("/cache/tkg-v5/node_emb_epoch_1.pt"):
+        WEIGHTS = "/cache/tkg-v5/node_emb_epoch_1.pt"
+    else:
+        WEIGHTS = "/cache/tkg-fullscale/node_embeddings.pt"
     DB = "/data/aggregated_fixed_union.db"
 
-    # Verify file size (V4 should be ~8.4GB = 35M×64×4 bytes)
+    # Verify file size
     wsize = os.path.getsize(WEIGHTS)
     print(f"Weights file: {WEIGHTS} ({wsize / 1e9:.1f} GB)")
 
