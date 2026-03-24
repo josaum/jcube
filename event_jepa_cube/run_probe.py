@@ -44,8 +44,8 @@ def run_probes():
 
     GRAPH = "/data/jcube_graph.parquet"
     # Auto-detect latest version: V6 (128-dim) > V5 (64-dim)
-    if os.path.exists("/cache/tkg-v6/node_embeddings.pt"):
-        WEIGHTS = "/cache/tkg-v6/node_embeddings.pt"
+    if os.path.exists("/cache/tkg-v6/node_emb_epoch_3.pt"):
+        WEIGHTS = "/cache/tkg-v6/node_emb_epoch_3.pt"
     elif os.path.exists("/cache/tkg-v5/node_emb_epoch_1.pt"):
         WEIGHTS = "/cache/tkg-v5/node_emb_epoch_1.pt"
     else:

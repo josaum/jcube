@@ -1203,6 +1203,12 @@ class V6Trainer:
         import numpy as np
         import torch
 
+        # Single-hospital mode: isolate artifacts to avoid overwriting full-graph checkpoints
+        if cfg.hospital_filter:
+            safe_name = cfg.hospital_filter.replace("/", "_").replace(" ", "_")
+            cfg.artifact_dir = cfg.artifact_dir + f"-{safe_name}"
+            print(f"  Single-hospital mode: artifacts → {cfg.artifact_dir}")
+
         self.cfg = cfg
         self.nn = nn_modules
         self.device = torch.device("cuda")

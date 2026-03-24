@@ -63,7 +63,7 @@ report_image = (
 # ─────────────────────────────────────────────────────────────────
 
 GRAPH_PARQUET  = "/data/jcube_graph.parquet"
-WEIGHTS_PATH   = "/cache/tkg-v6/node_embeddings.pt"
+WEIGHTS_PATH   = "/cache/tkg-v6/node_emb_epoch_3.pt"
 DB_PATH        = "/data/aggregated_fixed_union.db"
 OUTPUT_DIR     = "/data/reports"
 OUTPUT_PDF     = f"{OUTPUT_DIR}/anomaly_report_v6_2026_03.pdf"
