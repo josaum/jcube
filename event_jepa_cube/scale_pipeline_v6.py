@@ -844,7 +844,8 @@ def _build_nn_modules():
             unique_nodes, inverse = torch.unique(all_nodes, return_inverse=True)
 
             agg = torch.zeros(unique_nodes.size(0), self.msg_dim, device=device)
-            agg.scatter_(0, inverse.to(device).unsqueeze(-1).expand(-1, self.msg_dim), all_msgs)
+            # FIX: scatter_reduce_ to safely aggregate concurrent messages (avoid nondeterministic overwrite)
+            agg.scatter_reduce_(0, inverse.to(device).unsqueeze(-1).expand(-1, self.msg_dim), all_msgs, reduce="mean", include_self=False)
 
             return unique_nodes, agg, messages
 
@@ -1490,6 +1491,10 @@ class V6Trainer:
         if self.onto_indices:
             self.frozen_mask[torch.tensor(self.onto_indices, dtype=torch.long, device=self.device)] = True
 
+        # Cache frozen embeddings for hard-reset after each optimizer step
+        # (AdamW weight decay + momentum would otherwise drift frozen nodes)
+        self.frozen_embs_cache = self.node_emb.weight[self.frozen_mask].detach().clone()
+
     def _build_graph_data(self):
         """Build PyG Data object with numeric edge attribute."""
         import torch
@@ -1711,11 +1716,17 @@ class V6Trainer:
         n_terms = 0
 
         # Use node timestamps to compute realistic delta-t offsets
-        # Sort seed nodes by time for shifted target construction
+        # FIX: NeighborLoader uses shuffle=True — seed nodes are in random order.
+        # Must sort chronologically before shifting, otherwise we predict random
+        # patients' futures from unrelated patients' contexts.
         times_B = batch_node_time[:B].float()
+        sorted_idx = torch.argsort(times_B)
+        ctx_B = ctx_B[sorted_idx]
+        ema_B = ema_B[sorted_idx]
+        times_B = times_B[sorted_idx]
 
         for k in range(cfg.lookahead_steps):
-            # Shift target by k positions (nodes are time-ordered within batch)
+            # Shift target by k positions (now correctly time-ordered)
             shift = k + 1
             if shift >= B:
                 break
@@ -1849,11 +1860,11 @@ class V6Trainer:
         self.scaler.step(self.optimizer)
         self.scaler.update()
 
-        # Zero out gradients for frozen ontology nodes
+        # FIX: Hard-reset frozen ontology nodes (zeroing grad is insufficient —
+        # AdamW weight decay + momentum buffers still mutate frozen embeddings)
         if self.n_frozen > 0:
             with torch.no_grad():
-                if self.node_emb.weight.grad is not None:
-                    self.node_emb.weight.grad[self.frozen_mask] = 0.0
+                self.node_emb.weight[self.frozen_mask] = self.frozen_embs_cache
 
         # EMA update
         progress = total_steps / max(total_expected_steps, 1)
@@ -2181,7 +2192,7 @@ class V6Trainer:
 @scale_app.function(
     image=gpu_image_v6,
     gpu="A100-80GB",
-    timeout=172800,  # 48h (V6 trains longer with 128-dim)
+    timeout=86400,  # 24h (Modal max)
     volumes=VOLUMES,
     memory=204800,  # 200GB RAM for TGN memory + graph
 )
