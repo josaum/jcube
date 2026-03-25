@@ -413,7 +413,7 @@ def _fetch_operational_profile(con):
 
     # Top 10 procedures (TUSS) by volume
     cols, rows = _exec(con, f"""
-        SELECT COALESCE(p.DS_DESCRICAO, CAST(p.CD_PROCEDIMENTO AS VARCHAR)) AS proc_desc,
+        SELECT COALESCE(p.DS_DESCRICAO_PROCEDIMENTO, p.DS_TUSS, CAST(p.ID_CD_PROCEDIMENTO AS VARCHAR)) AS proc_desc,
                COUNT(*) AS n_procedimentos
         FROM agg_tb_fatura_procedimentos_fapr p
         WHERE p.{SRC}
