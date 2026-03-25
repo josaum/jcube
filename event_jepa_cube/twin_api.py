@@ -524,6 +524,273 @@ async def health() -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Embedding endpoints (V5 prod embeddings)
+# ---------------------------------------------------------------------------
+
+import numpy as np
+
+_emb_data: dict[str, Any] = {}  # "embeddings", "node_names", "node_to_idx"
+
+
+def _load_embeddings(
+    graph_path: str = "data/jcube_graph.parquet",
+    weights_path: str = "data/weights/node_emb_epoch_2.pt",
+) -> None:
+    """Load embeddings lazily on first request."""
+    if _emb_data.get("loaded"):
+        return
+
+    import torch
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    import pyarrow.compute as pc
+
+    print("Loading embedding graph vocabulary...")
+    t0 = time.time()
+    table = pq.read_table(graph_path, columns=["subject_id", "object_id"])
+    all_nodes = pa.chunked_array(
+        table.column("subject_id").chunks + table.column("object_id").chunks
+    )
+    unique_nodes = pc.unique(all_nodes)
+    node_names = unique_nodes.to_numpy(zero_copy_only=False).astype(object)
+    del table, all_nodes, unique_nodes
+
+    print(f"Loading embeddings from {weights_path}...")
+    state = torch.load(weights_path, map_location="cpu", weights_only=True)
+    if isinstance(state, torch.Tensor):
+        embeddings = state.float().numpy()
+    elif isinstance(state, dict) and "weight" in state:
+        embeddings = state["weight"].float().numpy()
+    else:
+        embeddings = list(state.values())[0].float().numpy()
+
+    if len(node_names) != embeddings.shape[0]:
+        print(f"WARNING: {len(node_names)} names vs {embeddings.shape[0]} vectors — truncating")
+        n = min(len(node_names), embeddings.shape[0])
+        node_names = node_names[:n]
+        embeddings = embeddings[:n]
+
+    node_to_idx = {str(name): i for i, name in enumerate(node_names)}
+
+    _emb_data["embeddings"] = embeddings
+    _emb_data["node_names"] = node_names
+    _emb_data["node_to_idx"] = node_to_idx
+    _emb_data["dim"] = embeddings.shape[1]
+    _emb_data["loaded"] = True
+    print(f"Embeddings loaded: {embeddings.shape} in {time.time()-t0:.1f}s")
+
+
+def _ensure_embeddings() -> None:
+    if not _emb_data.get("loaded"):
+        _load_embeddings()
+
+
+class SimilarResult(BaseModel):
+    node_id: str
+    similarity: float
+
+
+class AnomalyResult(BaseModel):
+    node_id: str
+    z_score: float
+    distance: float
+
+
+@app.get("/twin/embedding/info")
+async def embedding_info() -> dict[str, Any]:
+    """Get embedding metadata."""
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, _ensure_embeddings)
+    return {
+        "num_nodes": len(_emb_data["node_names"]),
+        "dim": _emb_data["dim"],
+        "loaded": True,
+    }
+
+
+@app.get("/twin/embedding/similar/{node_id}")
+async def find_similar(
+    node_id: str,
+    k: int = Query(default=10, ge=1, le=100),
+    entity_type: str = Query(default="", description="Filter results to this entity type"),
+) -> dict[str, Any]:
+    """Find the k most similar nodes to the given node_id."""
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, _ensure_embeddings)
+
+    embeddings = _emb_data["embeddings"]
+    node_names = _emb_data["node_names"]
+    node_to_idx = _emb_data["node_to_idx"]
+
+    if node_id not in node_to_idx:
+        raise HTTPException(404, f"Node '{node_id}' not found in embedding space")
+
+    idx = node_to_idx[node_id]
+    query_vec = embeddings[idx].reshape(1, -1)
+    nq = float(np.linalg.norm(query_vec).clip(min=1e-8))
+
+    # Filter by entity type if specified
+    if entity_type:
+        candidates = [
+            i for i, name in enumerate(node_names)
+            if entity_type in str(name) and i != idx
+        ]
+        if not candidates:
+            return {"query": node_id, "matches": [], "note": f"No nodes matching type '{entity_type}'"}
+        candidate_idx = np.array(candidates)
+        candidate_vecs = embeddings[candidate_idx]
+    else:
+        candidate_idx = np.arange(len(embeddings))
+        candidate_vecs = embeddings
+
+    nc = np.linalg.norm(candidate_vecs, axis=1).clip(min=1e-8)
+    sims = (candidate_vecs @ query_vec.T).squeeze() / (nc * nq)
+
+    top_k = min(k + 1, len(sims))
+    top_indices = np.argpartition(-sims, top_k)[:top_k]
+    top_indices = top_indices[np.argsort(-sims[top_indices])]
+
+    matches = []
+    for i in top_indices:
+        real_idx = candidate_idx[i] if entity_type else i
+        if real_idx == idx:
+            continue
+        matches.append(SimilarResult(
+            node_id=str(node_names[real_idx]),
+            similarity=round(float(sims[i]), 4),
+        ))
+        if len(matches) >= k:
+            break
+
+    return {"query": node_id, "matches": [m.model_dump() for m in matches]}
+
+
+@app.get("/twin/embedding/anomalies/{entity_type}")
+async def find_anomalies(
+    entity_type: str,
+    top: int = Query(default=20, ge=1, le=500),
+    source_db: str = Query(default="", description="Filter by hospital source"),
+) -> dict[str, Any]:
+    """Find the most anomalous nodes of a given entity type by distance from centroid."""
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, _ensure_embeddings)
+
+    embeddings = _emb_data["embeddings"]
+    node_names = _emb_data["node_names"]
+
+    # Find matching nodes
+    matches = []
+    for i, name in enumerate(node_names):
+        s = str(name)
+        if f"_CD_{entity_type}_" not in s and f"_{entity_type}_" not in s:
+            continue
+        if source_db and source_db not in s:
+            continue
+        matches.append(i)
+
+    if not matches:
+        raise HTTPException(404, f"No nodes found for entity type '{entity_type}'")
+
+    idx = np.array(matches)
+    vecs = embeddings[idx]
+    centroid = vecs.mean(axis=0, keepdims=True)
+    dists = np.linalg.norm(vecs - centroid, axis=1)
+    mean_d = float(dists.mean())
+    std_d = float(max(dists.std(), 1e-8))
+
+    top_n = min(top, len(dists))
+    top_indices = np.argpartition(-dists, top_n)[:top_n]
+    top_indices = top_indices[np.argsort(-dists[top_indices])]
+
+    results = []
+    for i in top_indices:
+        results.append(AnomalyResult(
+            node_id=str(node_names[idx[i]]),
+            z_score=round(float((dists[i] - mean_d) / std_d), 2),
+            distance=round(float(dists[i]), 4),
+        ))
+
+    return {
+        "entity_type": entity_type,
+        "source_db": source_db or "all",
+        "total_nodes": len(matches),
+        "mean_dist": round(mean_d, 4),
+        "std_dist": round(std_d, 4),
+        "anomalies": [r.model_dump() for r in results],
+    }
+
+
+@app.get("/twin/embedding/vector/{node_id}")
+async def get_vector(node_id: str) -> dict[str, Any]:
+    """Get the raw embedding vector for a node."""
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, _ensure_embeddings)
+
+    node_to_idx = _emb_data["node_to_idx"]
+    if node_id not in node_to_idx:
+        raise HTTPException(404, f"Node '{node_id}' not found")
+
+    idx = node_to_idx[node_id]
+    vec = _emb_data["embeddings"][idx]
+    return {
+        "node_id": node_id,
+        "dim": len(vec),
+        "vector": [round(float(v), 6) for v in vec],
+    }
+
+
+@app.post("/twin/embedding/search")
+async def search_by_vector(
+    request: dict[str, Any],
+) -> dict[str, Any]:
+    """Search for nearest nodes given a raw vector."""
+    loop = asyncio.get_event_loop()
+    await loop.run_in_executor(None, _ensure_embeddings)
+
+    vector = request.get("vector")
+    k = request.get("k", 10)
+    entity_type = request.get("entity_type", "")
+
+    if not vector or not isinstance(vector, list):
+        raise HTTPException(400, "Request must contain 'vector' (list of floats)")
+
+    query_vec = np.array(vector, dtype=np.float32).reshape(1, -1)
+    if query_vec.shape[1] != _emb_data["dim"]:
+        raise HTTPException(400, f"Vector dim {query_vec.shape[1]} != embedding dim {_emb_data['dim']}")
+
+    embeddings = _emb_data["embeddings"]
+    node_names = _emb_data["node_names"]
+    nq = float(np.linalg.norm(query_vec).clip(min=1e-8))
+
+    if entity_type:
+        candidates = [i for i, name in enumerate(node_names) if entity_type in str(name)]
+        if not candidates:
+            return {"matches": []}
+        candidate_idx = np.array(candidates)
+        candidate_vecs = embeddings[candidate_idx]
+    else:
+        candidate_idx = np.arange(len(embeddings))
+        candidate_vecs = embeddings
+
+    nc = np.linalg.norm(candidate_vecs, axis=1).clip(min=1e-8)
+    sims = (candidate_vecs @ query_vec.T).squeeze() / (nc * nq)
+
+    top_k = min(k, len(sims))
+    top_indices = np.argpartition(-sims, top_k)[:top_k]
+    top_indices = top_indices[np.argsort(-sims[top_indices])]
+
+    matches = []
+    for i in top_indices:
+        real_idx = candidate_idx[i] if entity_type else i
+        matches.append({
+            "node_id": str(node_names[real_idx]),
+            "similarity": round(float(sims[i]), 4),
+        })
+
+    return {"matches": matches}
+
+
+# ---------------------------------------------------------------------------
 # CLI entry point
 # ---------------------------------------------------------------------------
 
@@ -539,6 +806,8 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--no-profile", action="store_true", help="Skip column profiling")
     parser.add_argument("--no-fks", action="store_true", help="Skip FK discovery")
+    parser.add_argument("--graph", type=str, default="data/jcube_graph.parquet", help="Graph parquet for embeddings")
+    parser.add_argument("--weights", type=str, default="data/weights/node_emb_epoch_2.pt", help="Embedding weights")
     args = parser.parse_args()
 
     if args.db:
@@ -558,6 +827,12 @@ def main() -> None:
             f"{len(snap.foreign_keys)} FK candidates "
             f"(built in {snap.build_duration_s}s)"
         )
+
+    # Pre-load embeddings if weights file exists
+    import os
+    if os.path.exists(args.weights) and os.path.exists(args.graph):
+        print(f"Pre-loading embeddings from {args.weights}...")
+        _load_embeddings(graph_path=args.graph, weights_path=args.weights)
 
     uvicorn.run(app, host=args.host, port=args.port)
 
