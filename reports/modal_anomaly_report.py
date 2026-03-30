@@ -66,7 +66,7 @@ GRAPH_PARQUET  = "/data/jcube_graph.parquet"
 WEIGHTS_PATH   = "/cache/tkg-v6/node_emb_epoch_3.pt"
 DB_PATH        = "/data/aggregated_fixed_union.db"
 OUTPUT_DIR     = "/data/reports"
-OUTPUT_PDF     = f"{OUTPUT_DIR}/anomaly_report_v6_2026_03.pdf"
+OUTPUT_PDF     = f"{OUTPUT_DIR}/anomaly_report_v6_AB_2026_03.pdf"
 
 REPORT_DATE_STR = "2026-03-23"
 START_DATE_STR  = "2026-02-21"
@@ -1569,7 +1569,7 @@ Maior z: \textbf{""" + f"{max_z:.2f}" + r"""} \\
     L.append(r"""
 \subsection*{1. Modelo Graph-JEPA V6}
 O modelo \textit{Graph-JEPA V6} foi treinado sobre o grafo de conhecimento JCUBE com \textbf{35,2M nos}
-e \textbf{64 dimensoes} de embedding. Cada no representa uma entidade (internacao, paciente,
+e \textbf{128 dimensoes} de embedding (V6.1 — full epochs, 4x H100 DDP). Cada no representa uma entidade (internacao, paciente,
 fatura, medico, etc.) e as arestas representam relacoes entre elas.
 
 \subsection*{2. Deteccao de Anomalias via Z-score}

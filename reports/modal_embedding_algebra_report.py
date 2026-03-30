@@ -68,7 +68,7 @@ GRAPH_PARQUET = "/data/jcube_graph.parquet"
 WEIGHTS_PATH  = "/cache/tkg-v6/node_emb_epoch_3.pt"
 DB_PATH       = "/data/aggregated_fixed_union.db"
 OUTPUT_DIR    = "/data/reports"
-OUTPUT_PDF    = f"{OUTPUT_DIR}/embedding_algebra_v6_2026_03.pdf"
+OUTPUT_PDF    = f"{OUTPUT_DIR}/embedding_algebra_v6_AB_2026_03.pdf"
 
 REPORT_DATE_STR = "2026-03-23"
 
@@ -1058,7 +1058,7 @@ def _generate_latex(
 {\large\textcolor{jcubegray}{Digital Twin Analytics Platform --- Modelo V5}}\\[1.2cm]
 \begin{tcolorbox}[colback=jcubeblue,colframe=jcubeblue,coltext=white,width=0.92\textwidth,halign=center]
 {\LARGE\bfseries Algebra de Embeddings}\\[0.3cm]
-{\large O que se pode computar puramente com operacoes vetoriais\\sobre o Gemeo Digital 35,2M $\times$ 64}\\[0.2cm]
+{\large O que se pode computar puramente com operacoes vetoriais\\sobre o Gemeo Digital 35,2M $\times$ 128 (V6.1)}\\[0.2cm]
 {\normalsize Graph-JEPA V6 --- Dense Temporal World Model}
 \end{tcolorbox}
 \vspace{0.8cm}
@@ -1603,7 +1603,7 @@ mais similares --- sem nenhum modelo adicional, apenas algebra linear sobre o ge
     L.append(r"""
 \subsection*{1. Modelo Graph-JEPA V6}
 O modelo \textit{Graph-JEPA V6} foi treinado sobre o grafo de conhecimento JCUBE com
-\textbf{35,2M nos} e \textbf{64 dimensoes} de embedding.
+\textbf{35,2M nos} e \textbf{128 dimensoes} de embedding (V6.1 — DDP 4x H100, full epochs).
 Arquivo: \texttt{node\_emb\_epoch\_1.pt} (8,4 GB).
 
 \subsection*{2. Operacoes Vetoriais Utilizadas}

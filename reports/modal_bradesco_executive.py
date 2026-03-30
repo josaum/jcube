@@ -74,10 +74,10 @@ report_image = (
 # ─────────────────────────────────────────────────────────────────
 
 GRAPH_PARQUET = "/data/jcube_graph_v6.parquet"
-WEIGHTS_PATH  = "/cache/tkg-v6/node_emb_epoch_2.pt"
+WEIGHTS_PATH  = "/cache/tkg-v6/node_emb_epoch_3.pt"
 DB_PATH       = "/data/aggregated_fixed_union.db"
 OUTPUT_DIR    = "/data/reports"
-OUTPUT_PDF    = f"{OUTPUT_DIR}/bradesco_executive_v6_2026_03.pdf"
+OUTPUT_PDF    = f"{OUTPUT_DIR}/bradesco_executive_v6_AB_2026_03.pdf"
 
 REPORT_DATE_STR = "2026-03-24"
 SOURCE_DB       = "GHO-BRADESCO"

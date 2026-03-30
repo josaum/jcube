@@ -21,7 +21,7 @@ FLIGHT_URL = "grpc+tls://flight.getjai.com:443"
 FLIGHT_SECRET = "mycelia_dev_flight_secret"
 COLLECTION = "jcube_twin_v5"
 BATCH_SIZE = 50_000
-SESSION_SIZE = 500_000  # vectors per do_exchange session
+SESSION_SIZE = 200_000  # vectors per session (smaller to allow flush between sessions)
 KEY_TYPES = {"INTERNACAO", "PACIENTE", "FATURA", "CID", "TUSS", "HOSPITAL", "EVOLUCAO", "AUDITORIA", "MEDICO"}
 
 
@@ -92,15 +92,15 @@ def push_embeddings():
         ids = [str(names_np[i]) for i in session_idx]
         vecs = [emb[i].tolist() for i in session_idx]
 
-        # Split into sub-batches of 50K for the JSON payload
-        SUB_BATCH = 50000
+        # Split into sub-batches of 10K (smaller to avoid Milvus buffer OOM)
+        SUB_BATCH = 10000
         session_inserted = 0
         for sb_start in range(0, len(ids), SUB_BATCH):
             sb_ids = ids[sb_start:sb_start + SUB_BATCH]
             sb_vecs = vecs[sb_start:sb_start + SUB_BATCH]
             result = list(client.do_action(
                 flight.Action("collection_insert_vectors", json.dumps({
-                    "name": COLLECTION,
+                    "collection_name": COLLECTION,
                     "ids": sb_ids,
                     "vectors": sb_vecs,
                 }).encode()),
@@ -108,6 +108,18 @@ def push_embeddings():
             ))
             resp = json.loads(result[0].body.to_pybytes())
             session_inserted += resp.get("inserted", 0)
+
+        # Flush after each session to free Milvus insert buffer
+        try:
+            list(client.do_action(
+                flight.Action("collection_flush", json.dumps({
+                    "collection_name": COLLECTION,
+                }).encode()),
+                options
+            ))
+        except Exception:
+            # Flush not implemented — wait for auto-flush
+            import time as _t; _t.sleep(5)
 
         total_pushed += session_inserted
         elapsed = time.time() - t1
