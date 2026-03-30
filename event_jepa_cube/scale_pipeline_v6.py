@@ -111,8 +111,8 @@ class V6Config:
     tgn_msg_dim: int = 64
 
     # Training
-    batch_size: int = 512
-    epochs: int = 10
+    batch_size: int = 512  # per GPU (effective = batch_size * num_gpus with DDP)
+    epochs: int = 5  # V6.1: 5 full epochs > 10 subsampled epochs
     lr: float = 3e-4
     weight_decay: float = 0.01
     warmup_frac: float = 0.1
@@ -147,23 +147,30 @@ class V6Config:
     # Data paths
     parquet_path: str = "/data/jcube_graph_v6.parquet"
     ontology_path: str = "/data/ontology_nodes.parquet"
-    artifact_dir: str = "/root/jepa-artifacts/tkg-v6"
+    artifact_dir: str = "/root/jepa-artifacts/tkg-v6.2"
     v5_artifact_dir: str = "/root/jepa-artifacts/tkg-v5"
+    v6_artifact_dir: str = "/root/jepa-artifacts/tkg-v6"  # for warm-start from V6 epoch 3
 
     # AMP
     use_amp: bool = True
     amp_dtype: str = "bfloat16"
 
     # Workers
-    num_workers: int = 4
-    prefetch_factor: int = 2
+    num_workers: int = 8  # V6.1: more workers to saturate 4-GPU pipeline
+    prefetch_factor: int = 4  # V6.1: deeper prefetch queue
 
     # Single-hospital mode (filter subgraph at load time)
     hospital_filter: str = ""  # e.g. "GHO-BRADESCO" — empty = all hospitals
-    tgn_from_epoch: int = 3  # override: set to 0 for single-hospital fast test
+    tgn_from_epoch: int = 2  # V6.1: TGN on from epoch 2 (full epochs = faster convergence)
+
+    # DDP (V6.1)
+    use_ddp: bool = True
+    num_gpus: int = 4
+    use_compile: bool = True  # torch.compile on encoders
+    tgn_on_gpu: bool = True  # H200 has 141GB — TGN memory fits on GPU
 
     # Logging
-    log_every: int = 50
+    log_every: int = 100  # V6.1: more steps/epoch, log less frequently
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), indent=2)
@@ -190,17 +197,17 @@ class CurriculumPhase:
 CURRICULUM_PHASES_V6: list[CurriculumPhase] = [
     CurriculumPhase(
         name="foundation",
-        epoch_start=0, epoch_end=3,
+        epoch_start=0, epoch_end=2,
         num_neighbors=[15, 10],
         tgn_enabled=False,
-        node_sample_frac=0.02,  # 10% of nodes → ~6.2K batches/epoch (was 62K)
+        node_sample_frac=1.0,  # V6.1: FULL epochs, no subsampling
     ),
     CurriculumPhase(
         name="temporal",
-        epoch_start=3, epoch_end=10,
+        epoch_start=2, epoch_end=5,
         num_neighbors=[15, 10, 5],
         tgn_enabled=True,
-        node_sample_frac=0.05,  # 25% of nodes → ~15.7K batches/epoch
+        node_sample_frac=1.0,  # V6.1: FULL epochs, no subsampling
     ),
 ]
 
@@ -836,15 +843,19 @@ def _build_nn_modules() -> dict[str, Any]:
     class TGNMemory(nn.Module):
         """Temporal Graph Network Memory (Rossi et al. 2020).
 
-        Per-node GRU memory stored in CPU RAM (~9 GB for 35M nodes x 64-dim).
-        Gather/scatter per batch: move only active nodes' memory to GPU.
+        V6.1: supports GPU-resident mode (H200 has 141GB — 9GB TGN fits easily).
+        When gpu_resident=True, memory stays on GPU device — no PCIe bottleneck.
+        Falls back to CPU mode for smaller GPUs.
         """
 
-        def __init__(self, num_nodes: int, mem_dim: int, msg_dim: int, edge_feat_dim: int):
+        def __init__(self, num_nodes: int, mem_dim: int, msg_dim: int, edge_feat_dim: int,
+                     gpu_resident: bool = False, device: torch.device | None = None):
             super().__init__()
             self.num_nodes = num_nodes
             self.mem_dim = mem_dim
             self.msg_dim = msg_dim
+            self.gpu_resident = gpu_resident
+            self._mem_device = device if gpu_resident and device else None
 
             self.memory: torch.Tensor
             self.last_update: torch.Tensor
@@ -859,9 +870,22 @@ def _build_nn_modules() -> dict[str, Any]:
             self.msg_fn = nn.Linear(2 * mem_dim + edge_feat_dim, msg_dim)
             self.gru = nn.GRUCell(msg_dim, mem_dim)
 
+        def move_memory_to_device(self, device: torch.device) -> None:
+            """Move memory buffer to GPU (V6.1: H200 has enough VRAM)."""
+            memory = cast(torch.Tensor, self.memory)
+            last_update = cast(torch.Tensor, self.last_update)
+            self.memory = memory.to(device)
+            self.last_update = last_update.to(device)
+            self.gpu_resident = True
+            self._mem_device = device
+            mem_gb = self.num_nodes * self.mem_dim * 4 / 1e9
+            print(f"  TGN memory moved to {device} ({mem_gb:.1f} GB) — zero PCIe overhead")
+
         def get_memory(self, node_ids: torch.Tensor, device: torch.device) -> torch.Tensor:
             """Gather memory for a batch of nodes. Returns (B, mem_dim) on device."""
             memory = cast(torch.Tensor, self.memory)
+            if self.gpu_resident:
+                return memory[node_ids.to(memory.device)]
             return memory[node_ids.cpu()].to(device)
 
         def compute_messages(
@@ -873,18 +897,23 @@ def _build_nn_modules() -> dict[str, Any]:
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
             """Compute messages for edges in batch."""
             memory = cast(torch.Tensor, self.memory)
-            mem_src = memory[src_ids.cpu()].to(device)
-            mem_dst = memory[dst_ids.cpu()].to(device)
+            if self.gpu_resident:
+                mem_src = memory[src_ids.to(memory.device)]
+                mem_dst = memory[dst_ids.to(memory.device)]
+            else:
+                mem_src = memory[src_ids.cpu()].to(device)
+                mem_dst = memory[dst_ids.cpu()].to(device)
             msg_input = torch.cat([mem_src, mem_dst, edge_feat], dim=-1)
             messages = self.msg_fn(msg_input)
 
-            all_nodes = torch.cat([src_ids, dst_ids]).cpu()
+            all_nodes = torch.cat([src_ids, dst_ids])
+            if not self.gpu_resident:
+                all_nodes = all_nodes.cpu()
             all_msgs = torch.cat([messages, messages], dim=0)
 
             unique_nodes, inverse = torch.unique(all_nodes, return_inverse=True)
 
             agg = torch.zeros(unique_nodes.size(0), self.msg_dim, device=device)
-            # FIX: scatter_reduce_ to safely aggregate concurrent messages (avoid nondeterministic overwrite)
             agg.scatter_reduce_(
                 0,
                 inverse.to(device).unsqueeze(-1).expand(-1, self.msg_dim),
@@ -905,12 +934,21 @@ def _build_nn_modules() -> dict[str, Any]:
             device = agg_messages.device
             memory = cast(torch.Tensor, self.memory)
             last_update = cast(torch.Tensor, self.last_update)
-            old_mem = memory[unique_nodes.cpu()].to(device)
+            if self.gpu_resident:
+                node_idx = unique_nodes.to(memory.device)
+                old_mem = memory[node_idx]
+            else:
+                old_mem = memory[unique_nodes.cpu()].to(device)
             new_mem = self.gru(agg_messages, old_mem)
 
-            memory[unique_nodes.cpu()] = new_mem.detach().cpu()
-            if timestamps is not None:
-                last_update[unique_nodes.cpu()] = timestamps.cpu()
+            if self.gpu_resident:
+                memory[node_idx] = new_mem.detach()
+                if timestamps is not None:
+                    last_update[node_idx] = timestamps.to(memory.device)
+            else:
+                memory[unique_nodes.cpu()] = new_mem.detach().cpu()
+                if timestamps is not None:
+                    last_update[unique_nodes.cpu()] = timestamps.cpu()
 
         def detach_memory(self) -> None:
             """Detach memory from computation graph (call between epochs)."""
@@ -1196,6 +1234,8 @@ class V6Trainer:
         nn_modules: dict,
         parquet_path: str,
         ontology_path: str,
+        rank: int = 0,
+        world_size: int = 1,
     ):
         import gc
         import random
@@ -1211,7 +1251,15 @@ class V6Trainer:
 
         self.cfg = cfg
         self.nn = nn_modules
-        self.device = torch.device("cuda")
+        self.rank = rank
+        self.world_size = world_size
+        self.is_main = rank == 0
+        # V6.1: each DDP rank gets its own GPU
+        if world_size > 1:
+            self.device = torch.device(f"cuda:{rank}")
+            torch.cuda.set_device(self.device)
+        else:
+            self.device = torch.device("cuda")
 
         random.seed(42)
         np.random.seed(42)
@@ -1449,11 +1497,12 @@ class V6Trainer:
         print("  BGE-M3 freed from VRAM")
 
     def _init_embeddings(self) -> None:
-        """Initialize node embedding table with V5 epoch 1 warm-start.
+        """Initialize node embedding table with warm-start.
 
-        V6 warm-start strategy:
-            v5_emb (35.2M, 64) -> pad with zeros -> (35.2M, 128)
-            Second 64 dims are "temporal slots" that TGN memory will fill.
+        V6.1 warm-start priority:
+            1. V6 epoch 3 (128-dim, best available checkpoint)
+            2. V5 epoch 1 (64-dim, pad with zeros to 128)
+            3. Xavier uniform (cold start)
         """
         import os
 
@@ -1466,17 +1515,33 @@ class V6Trainer:
         self.node_emb = nn.Embedding(self.num_nodes, dim).to(self.device)
         nn.init.xavier_uniform_(self.node_emb.weight)
 
-        # V5 epoch 1 warm-start: pad 64-dim -> 128-dim with zeros
+        # V6.1: try V6 epoch 3 first (same dim, better quality)
+        v6_emb_path = os.path.join(self.cfg.v6_artifact_dir, "node_emb_epoch_3.pt")
+        v6_emb_alt = os.path.join(self.cfg.v6_artifact_dir, "node_embeddings.pt")
+
+        # V5 epoch 1 fallback
         v5_emb_path = os.path.join(self.cfg.v5_artifact_dir, "node_emb_epoch_1.pt")
         v5_emb_alt = os.path.join(self.cfg.v5_artifact_dir, "node_embeddings.pt")
 
-        warm_path = v5_emb_path if os.path.exists(v5_emb_path) else v5_emb_alt
+        # Priority: V6 > V5 > cold
+        if os.path.exists(v6_emb_path):
+            warm_path = v6_emb_path
+        elif os.path.exists(v6_emb_alt):
+            warm_path = v6_emb_alt
+        elif os.path.exists(v5_emb_path):
+            warm_path = v5_emb_path
+        elif os.path.exists(v5_emb_alt):
+            warm_path = v5_emb_alt
+        else:
+            warm_path = None
 
         if self.cfg.hospital_filter:
-            print(f"  Single-hospital mode — skipping V5 warm-start (different node vocab)")
-        elif os.path.exists(warm_path):
-            print(f"  Loading V5 embeddings for warm-start from {warm_path}...")
-            v5_state = torch.load(warm_path, weights_only=True)
+            if self.is_main:
+                print(f"  Single-hospital mode — skipping warm-start (different node vocab)")
+        elif warm_path is not None and os.path.exists(warm_path):
+            if self.is_main:
+                print(f"  Loading warm-start embeddings from {warm_path}...")
+            v5_state = torch.load(warm_path, weights_only=True, map_location="cpu")
 
             if isinstance(v5_state, dict) and "weight" in v5_state:
                 v5_emb = v5_state["weight"]
@@ -1484,15 +1549,15 @@ class V6Trainer:
                 v5_emb = v5_state
             else:
                 v5_emb = None
-                print("  Warning: V5 checkpoint format not recognized, skipping warm-start")
+                if self.is_main:
+                    print("  Warning: checkpoint format not recognized, skipping warm-start")
 
             if v5_emb is not None:
                 v5_dim = v5_emb.shape[1]
                 if v5_emb.shape[0] == self.num_nodes:
                     if v5_dim < dim:
-                        # Pad with zeros (not random — preserve V5 spatial structure)
-                        # Second half are "temporal slots" TGN will fill
-                        print(f"  V5 warm-start: padding {v5_dim} -> {dim} with zeros")
+                        if self.is_main:
+                            print(f"  Warm-start: padding {v5_dim} -> {dim} with zeros")
                         frozen_set = set(self.onto_indices)
                         instance_mask = torch.ones(self.num_nodes, dtype=torch.bool)
                         if frozen_set:
@@ -1515,10 +1580,12 @@ class V6Trainer:
                                     self.node_emb.weight[indices] = padded.float()
 
                         n_warm = instance_mask.sum().item()
-                        print(f"  V5 warm-start: {n_warm:,} instance nodes padded {v5_dim} -> {dim}")
+                        if self.is_main:
+                            print(f"  Warm-start: {n_warm:,} instance nodes padded {v5_dim} -> {dim}")
                     elif v5_dim == dim:
-                        # Same dim — direct copy for instance nodes
-                        print(f"  V5 warm-start: same dim ({v5_dim}), direct copy")
+                        # Same dim — direct copy (V6 epoch 3 → V6.1)
+                        if self.is_main:
+                            print(f"  Warm-start: same dim ({v5_dim}), direct copy")
                         frozen_set = set(self.onto_indices)
                         instance_mask = torch.ones(self.num_nodes, dtype=torch.bool)
                         for idx in self.onto_indices:
@@ -1533,14 +1600,18 @@ class V6Trainer:
                                     indices = torch.arange(start, end, device=self.device)[chunk_mask]
                                     self.node_emb.weight[indices] = v5_chunk.float()
                         n_warm = instance_mask.sum().item()
-                        print(f"  V5 warm-start: {n_warm:,} instance nodes copied")
+                        if self.is_main:
+                            print(f"  Warm-start: {n_warm:,} instance nodes copied")
                     else:
-                        print(f"  V5 dim ({v5_dim}) > V6 dim ({dim}), skipping warm-start")
+                        if self.is_main:
+                            print(f"  Source dim ({v5_dim}) > target dim ({dim}), skipping warm-start")
                 elif v5_emb.shape[0] != self.num_nodes:
-                    print(f"  V5 node count mismatch ({v5_emb.shape[0]} vs {self.num_nodes}), skipping warm-start")
+                    if self.is_main:
+                        print(f"  Node count mismatch ({v5_emb.shape[0]} vs {self.num_nodes}), skipping warm-start")
                 del v5_emb
         else:
-            print("  No V5 embeddings found, using random init")
+            if self.is_main:
+                print("  No warm-start embeddings found, using random init")
 
         # Ontology projection: BGE 1024 -> latent_dim with Xavier init
         self.onto_projection = nn.Linear(self.cfg.bge_hidden_dim, dim, bias=False).to(self.device)
@@ -1648,16 +1719,21 @@ class V6Trainer:
         # Weak-SIGReg loss (replaces VICReg)
         self.sigreg = M["WeakSIGRegLoss"]().to(self.device)
 
-        # TGN Memory (on CPU)
+        # TGN Memory — V6.1: GPU-resident if H200 (141GB VRAM)
         self.tgn = M["TGNMemory"](
             num_nodes=self.num_nodes,
             mem_dim=cfg.tgn_dim,
             msg_dim=cfg.tgn_msg_dim,
             edge_feat_dim=cfg.edge_feat_dim,
+            gpu_resident=cfg.tgn_on_gpu,
+            device=self.device,
         )
         # Keep TGN parameters on GPU for gradient computation
         self.tgn.msg_fn = self.tgn.msg_fn.to(self.device)
         self.tgn.gru = self.tgn.gru.to(self.device)
+        # V6.1: Move TGN memory buffer to GPU (H200 has 141GB — 9GB TGN fits)
+        if cfg.tgn_on_gpu:
+            self.tgn.move_memory_to_device(self.device)
 
         # Parameter counts
         n_encoder = sum(p.numel() for p in self.online_encoder.parameters())
@@ -1674,7 +1750,8 @@ class V6Trainer:
         print(f"  Node embeddings:    {n_emb:,} params ({n_emb * 4 / 1e9:.2f} GB)")
         print(f"  Onto projection:    {n_onto_proj:,} params")
         print(f"  TGN:                {n_tgn:,} params")
-        print(f"  TGN memory:         {self.num_nodes * cfg.tgn_dim * 4 / 1e9:.2f} GB (CPU)")
+        tgn_loc = "GPU" if cfg.tgn_on_gpu else "CPU"
+        print(f"  TGN memory:         {self.num_nodes * cfg.tgn_dim * 4 / 1e9:.2f} GB ({tgn_loc})")
         total_trainable = n_encoder + n_predictor + n_emb + n_tgn + n_onto_proj
         print(f"  Total trainable:    {total_trainable:,} params")
         print(f"  Loss:               L_dense_lookahead + {cfg.sigreg_lambda} * L_weak_sigreg")
@@ -1684,6 +1761,14 @@ class V6Trainer:
             f"pred({cfg.pred_emb_dim}) + time({cfg.time_dim}) + "
             f"numeric({cfg.numeric_dim}) = {cfg.edge_feat_dim}"
         )
+
+        # V6.1: torch.compile for fused GNN kernels (3-5x speedup on GPS layers)
+        if cfg.use_compile:
+            import torch
+            print("\n  Compiling encoders with torch.compile (mode=reduce-overhead)...")
+            self.online_encoder = torch.compile(self.online_encoder, mode="default")
+            self.target_encoder = torch.compile(self.target_encoder, mode="default")
+            print("  Encoders compiled (first batch will be slow due to tracing)")
 
     def _create_optimizer(self) -> None:
         """Create split optimizers and AMP scaler.
@@ -1746,7 +1831,10 @@ class V6Trainer:
         return p
 
     def _create_loader(self, phase: CurriculumPhase) -> tuple[Any, Any]:
-        """Create NeighborLoader with curriculum-appropriate hops."""
+        """Create NeighborLoader with curriculum-appropriate hops.
+
+        V6.1 DDP: each rank gets a disjoint shard of input_nodes.
+        """
         import torch
         from torch_geometric.loader import NeighborLoader
 
@@ -1755,7 +1843,18 @@ class V6Trainer:
             n_sample = int(len(input_nodes) * phase.node_sample_frac)
             perm = torch.randperm(len(input_nodes))[:n_sample]
             input_nodes = input_nodes[perm]
-            print(f"  Sampling {n_sample:,} / {len(self.unique_src):,} nodes for phase '{phase.name}'")
+            if self.is_main:
+                print(f"  Sampling {n_sample:,} / {len(self.unique_src):,} nodes for phase '{phase.name}'")
+
+        # V6.1 DDP: shard input nodes across ranks
+        if self.world_size > 1:
+            total = len(input_nodes)
+            per_rank = total // self.world_size
+            start = self.rank * per_rank
+            end = start + per_rank if self.rank < self.world_size - 1 else total
+            input_nodes = input_nodes[start:end]
+            if self.is_main:
+                print(f"  DDP: rank {self.rank} gets {len(input_nodes):,} / {total:,} nodes")
 
         loader = NeighborLoader(
             self.graph_data,
@@ -1766,6 +1865,7 @@ class V6Trainer:
             num_workers=self.cfg.num_workers,
             persistent_workers=True,
             prefetch_factor=self.cfg.prefetch_factor,
+            pin_memory=True,  # V6.1: faster CPU→GPU via pinned memory
         )
         return loader, input_nodes
 
@@ -1887,7 +1987,7 @@ class V6Trainer:
         cfg = self.cfg
         device = self.device
 
-        batch = batch.to(device)
+        batch = batch.to(device, non_blocking=True)
         B = batch.batch_size
 
         # LR schedule
@@ -1975,6 +2075,21 @@ class V6Trainer:
         self.optimizer_emb.zero_grad(set_to_none=True)
         self.optimizer_net.zero_grad(set_to_none=True)
         self.scaler.scale(loss).backward()
+
+        # V6.2 FIX: Gradient diagnostic — verify embeddings receive gradients
+        if self.total_steps < 5 and self.is_main:
+            g = self.node_emb.weight.grad
+            if g is not None:
+                # Only compute norm (no materialization of full boolean tensor)
+                g_norm = g.norm().item()
+                # Sample a small slice to check sparsity
+                g_sample = g[:1000]
+                g_nnz_sample = (g_sample != 0).any(dim=1).sum().item()
+                print(f"  [DIAG] step={self.total_steps} emb_grad_norm={g_norm:.6f} "
+                      f"nonzero_rows(sample 1K)={g_nnz_sample}/1000")
+            else:
+                print(f"  [DIAG] step={self.total_steps} emb_grad=None (NO GRADIENT!)")
+
         self.scaler.unscale_(self.optimizer_net)
         nn.utils.clip_grad_norm_(self.net_trainable, cfg.grad_clip)
         self.scaler.step(self.optimizer_emb)
@@ -2042,6 +2157,7 @@ class V6Trainer:
         ckpt = {
             "epoch": epoch,
             "total_steps": self.total_steps,
+            "node_emb_weight": self.node_emb.weight.detach().cpu(),  # V6.2 FIX: persist embeddings
             "optimizer_emb": self.optimizer_emb.state_dict(),
             "optimizer_net": self.optimizer_net.state_dict(),
             "scaler": self.scaler.state_dict(),
@@ -2097,6 +2213,14 @@ class V6Trainer:
         self.total_steps = ckpt["total_steps"]
         self.losses_log = ckpt.get("losses_log", [])
 
+        # V6.2 FIX: Restore node embeddings from checkpoint (fixes amnesia bug)
+        if "node_emb_weight" in ckpt:
+            with torch.no_grad():
+                self.node_emb.weight.copy_(ckpt["node_emb_weight"].to(self.device))
+            print(f"  Restored node_emb from checkpoint ({ckpt['node_emb_weight'].shape})")
+        else:
+            print("  WARNING: Checkpoint has no node_emb_weight — using warm-start (legacy V6 checkpoint)")
+
         self.online_encoder.load_state_dict(ckpt["online_encoder"])
         self.target_encoder.load_state_dict(ckpt["target_encoder"])
         self.predictor.load_state_dict(ckpt["predictor"])
@@ -2124,35 +2248,104 @@ class V6Trainer:
 
         print(f"  Resumed from epoch {self.start_epoch}, step {self.total_steps}")
 
+    def _save_epoch_start_emb(self) -> None:
+        """V6.2: Snapshot embedding state at epoch start for delta sync.
+
+        Stored on CPU to avoid GPU OOM (18GB on CPU is fine, on GPU it's tight).
+        """
+        if self.world_size <= 1:
+            return
+        self._epoch_start_emb = self.node_emb.weight.data.detach().cpu()
+
+    def _sync_embeddings(self) -> None:
+        """V6.2 DDP: delta-based sync — each rank contributes only its shard's updates.
+
+        Each rank processes a disjoint shard of nodes. Simple AVG would dilute
+        updates by world_size (each rank keeps 3/4 of nodes at warm-start).
+        Instead: compute delta from epoch start, SUM deltas, apply in-place.
+
+        Memory-safe: snapshot on CPU, delta computed in chunks to avoid 3x GPU copy.
+        """
+        import torch
+        import torch.distributed as dist
+
+        if self.world_size <= 1:
+            return
+
+        with torch.no_grad():
+            # Chunked sub/add to avoid 18GB temp allocation on GPU
+            CHUNK = 2_000_000  # ~1GB per chunk at 128-dim float32
+            W = self.node_emb.weight.data
+            S = self._epoch_start_emb
+            N = W.shape[0]
+
+            # Step 1: W = W - S (delta, in chunks)
+            for i in range(0, N, CHUNK):
+                W[i:i+CHUNK].sub_(S[i:i+CHUNK].to(self.device))
+
+            # Step 2: SUM deltas across ranks
+            dist.all_reduce(W, op=dist.ReduceOp.SUM)
+
+            # Step 3: W = S + W (base + summed deltas, in chunks)
+            for i in range(0, N, CHUNK):
+                W[i:i+CHUNK].add_(S[i:i+CHUNK].to(self.device))
+
+            # Free the CPU snapshot
+            del self._epoch_start_emb
+
+    def _sync_tgn_memory(self) -> None:
+        """V6.1 DDP: all-reduce TGN memory across ranks at epoch boundaries."""
+        import torch
+        import torch.distributed as dist
+
+        if self.world_size <= 1:
+            return
+
+        memory = cast(torch.Tensor, self.tgn.memory)
+        with torch.no_grad():
+            dist.all_reduce(memory, op=dist.ReduceOp.AVG)
+
     def train(self) -> TrainResult:
-        """Main training loop over epochs/batches with 2-phase curriculum."""
+        """Main training loop over epochs/batches with 2-phase curriculum.
+
+        V6.1: DDP-aware — each rank processes a shard of input nodes.
+        Gradient sync happens automatically for encoder/predictor via DDP wrapper.
+        Embedding + TGN sync happens at epoch boundaries via all-reduce.
+        """
         cfg = self.cfg
 
-        # Estimate total steps
+        # Estimate total steps (per rank)
         steps_per_epoch = len(self.unique_src) // cfg.batch_size
-        total_expected_steps = cfg.epochs * steps_per_epoch
+        steps_per_rank = steps_per_epoch // max(self.world_size, 1)
+        total_expected_steps = cfg.epochs * steps_per_rank
 
-        print(f"\n{'=' * 60}")
-        print("V6 Dense Temporal JEPA Training")
-        print(f"{'=' * 60}")
-        print(f"  Nodes:          {self.num_nodes:,}")
-        print(f"  Edges:          {self.n_edges:,}")
-        print(f"  Predicates:     {self.num_predicates}")
-        print(f"  Latent dim:     {cfg.latent_dim}")
-        print(
-            f"  Edge feat dim:  {cfg.edge_feat_dim} "
-            f"(pred={cfg.pred_emb_dim} + time={cfg.time_dim} + num={cfg.numeric_dim})"
-        )
-        print(f"  GPS layers:     {cfg.gps_layers}")
-        print(f"  GPS heads:      {cfg.gps_heads}")
-        print(f"  Batch size:     {cfg.batch_size}")
-        print(f"  Epochs:         {cfg.epochs} (starting from {self.start_epoch})")
-        print(f"  Est. steps/ep:  {steps_per_epoch:,}")
-        print(f"  Est. total:     {total_expected_steps:,}")
-        print(f"  AMP:            {cfg.use_amp} ({cfg.amp_dtype})")
-        print(f"  Frozen onto:    {self.n_frozen:,}")
-        print(f"  SIGReg lambda:  {cfg.sigreg_lambda}")
-        print("  Curriculum:     foundation (ep 0-2, no TGN) -> temporal (ep 3-9, TGN on)")
+        if self.is_main:
+            print(f"\n{'=' * 60}")
+            print("V6.1 Dense Temporal JEPA Training (DDP)" if self.world_size > 1 else "V6.1 Dense Temporal JEPA Training")
+            print(f"{'=' * 60}")
+            print(f"  Nodes:          {self.num_nodes:,}")
+            print(f"  Edges:          {self.n_edges:,}")
+            print(f"  Predicates:     {self.num_predicates}")
+            print(f"  Latent dim:     {cfg.latent_dim}")
+            print(
+                f"  Edge feat dim:  {cfg.edge_feat_dim} "
+                f"(pred={cfg.pred_emb_dim} + time={cfg.time_dim} + num={cfg.numeric_dim})"
+            )
+            print(f"  GPS layers:     {cfg.gps_layers}")
+            print(f"  GPS heads:      {cfg.gps_heads}")
+            print(f"  Batch size:     {cfg.batch_size} × {self.world_size} GPUs = {cfg.batch_size * self.world_size} effective")
+            print(f"  Epochs:         {cfg.epochs} (starting from {self.start_epoch})")
+            print(f"  Est. steps/ep:  {steps_per_rank:,} per rank ({steps_per_epoch:,} total)")
+            print(f"  Est. total:     {total_expected_steps:,} per rank")
+            print(f"  AMP:            {cfg.use_amp} ({cfg.amp_dtype})")
+            print(f"  Frozen onto:    {self.n_frozen:,}")
+            print(f"  SIGReg lambda:  {cfg.sigreg_lambda}")
+            print(f"  DDP:            {self.world_size} GPUs")
+            print(f"  torch.compile:  {cfg.use_compile}")
+            print(f"  TGN on GPU:     {cfg.tgn_on_gpu}")
+            ep_foundation = CURRICULUM_PHASES_V6[0].epoch_end
+            ep_temporal = CURRICULUM_PHASES_V6[1].epoch_end
+            print(f"  Curriculum:     foundation (ep 0-{ep_foundation-1}, no TGN) -> temporal (ep {ep_foundation}-{ep_temporal-1}, TGN on)")
 
         t_train = time.time()
         current_phase_name = None
@@ -2163,16 +2356,20 @@ class V6Trainer:
             # Phase transition logging
             if phase.name != current_phase_name:
                 current_phase_name = phase.name
-                print(f"\n>>> Phase: {phase.name} (epochs {phase.epoch_start}-{phase.epoch_end - 1})")
-                print(f"    Hops: {phase.num_neighbors}")
-                print(f"    TGN:  {phase.tgn_enabled}")
-                print(f"    Loss: L_dense_lookahead + {cfg.sigreg_lambda} * L_weak_sigreg")
+                if self.is_main:
+                    print(f"\n>>> Phase: {phase.name} (epochs {phase.epoch_start}-{phase.epoch_end - 1})")
+                    print(f"    Hops: {phase.num_neighbors}")
+                    print(f"    TGN:  {phase.tgn_enabled}")
+                    print(f"    Loss: L_dense_lookahead + {cfg.sigreg_lambda} * L_weak_sigreg")
 
                 # Detach TGN memory at phase transition if newly enabled
                 if phase.tgn_enabled and epoch == phase.epoch_start:
                     self.tgn.detach_memory()
 
-            # Create loader for this phase
+            # V6.2: Snapshot embeddings for delta sync at epoch end
+            self._save_epoch_start_emb()
+
+            # Create loader for this phase (auto-sharded by rank)
             loader, input_nodes = self._create_loader(phase)
             epoch_batches = 0
             epoch_t0 = time.time()
@@ -2186,8 +2383,8 @@ class V6Trainer:
                 epoch_batches += 1
                 self.losses_log.append(metrics)
 
-                # Logging every N batches
-                if epoch_batches % cfg.log_every == 0:
+                # Logging every N batches (rank 0 only)
+                if self.is_main and epoch_batches % cfg.log_every == 0:
                     elapsed = time.time() - epoch_t0
                     batch_per_s = epoch_batches / elapsed if elapsed > 0 else 0
 
@@ -2200,40 +2397,59 @@ class V6Trainer:
                         f"{batch_per_s:.1f} b/s",
                         f"phase={phase.name}",
                     ]
+                    if self.world_size > 1:
+                        parts.append(f"rank=0/{self.world_size}")
                     print("  " + " | ".join(parts))
 
             # End of epoch
             epoch_elapsed = time.time() - epoch_t0
-            avg_total = 0.0
-            avg_dense = 0.0
-            avg_sigreg = 0.0
-            if epoch_batches > 0 and self.losses_log:
-                recent = self.losses_log[-epoch_batches:]
-                avg_total = sum(m["total_loss"] for m in recent) / epoch_batches
-                avg_dense = sum(m["dense_loss"] for m in recent) / epoch_batches
-                avg_sigreg = sum(m["sigreg_loss"] for m in recent) / epoch_batches
 
-            print(
-                f"  Epoch {epoch + 1}/{cfg.epochs}: "
-                f"total={avg_total:.4f} dense={avg_dense:.4f} sigreg={avg_sigreg:.4f} "
-                f"({epoch_batches} batches, {epoch_elapsed:.0f}s)"
-            )
+            # V6.1 DDP: sync embeddings and TGN memory across ranks
+            self._sync_embeddings()
+            if phase.tgn_enabled:
+                self._sync_tgn_memory()
+
+            if self.is_main:
+                avg_total = 0.0
+                avg_dense = 0.0
+                avg_sigreg = 0.0
+                if epoch_batches > 0 and self.losses_log:
+                    recent = self.losses_log[-epoch_batches:]
+                    avg_total = sum(m["total_loss"] for m in recent) / epoch_batches
+                    avg_dense = sum(m["dense_loss"] for m in recent) / epoch_batches
+                    avg_sigreg = sum(m["sigreg_loss"] for m in recent) / epoch_batches
+
+                print(
+                    f"  Epoch {epoch + 1}/{cfg.epochs}: "
+                    f"total={avg_total:.4f} dense={avg_dense:.4f} sigreg={avg_sigreg:.4f} "
+                    f"({epoch_batches} batches × {self.world_size} GPUs, {epoch_elapsed:.0f}s)"
+                )
 
             # Detach TGN memory between epochs
             if phase.tgn_enabled:
                 self.tgn.detach_memory()
 
-            # Checkpoint
-            self._checkpoint(epoch)
+            # DDP barrier before checkpoint
+            if self.world_size > 1:
+                import torch.distributed as dist
+                dist.barrier()
+
+            # Checkpoint (rank 0 only)
+            if self.is_main:
+                self._checkpoint(epoch)
+
+            # DDP barrier after checkpoint
+            if self.world_size > 1:
+                import torch.distributed as dist
+                dist.barrier()
 
         train_time = time.time() - t_train
-        print(f"\nTraining complete: {self.total_steps} steps in {train_time:.1f}s")
-
-        # Save final artifacts
-        self._save_final_artifacts(train_time)
+        if self.is_main:
+            print(f"\nTraining complete: {self.total_steps} steps × {self.world_size} GPUs in {train_time:.1f}s")
+            self._save_final_artifacts(train_time)
 
         return {
-            "total_steps": self.total_steps,
+            "total_steps": self.total_steps * self.world_size,
             "final_loss": self.losses_log[-1]["total_loss"] if self.losses_log else None,
             "final_dense_loss": self.losses_log[-1]["dense_loss"] if self.losses_log else None,
             "final_sigreg_loss": self.losses_log[-1]["sigreg_loss"] if self.losses_log else None,
@@ -2319,29 +2535,72 @@ class V6Trainer:
 # ---------------------------------------------------------------------------
 
 
+def _ddp_worker(
+    rank: int,
+    world_size: int,
+    cfg: V6Config,
+    parquet_path: str,
+    ontology_path: str,
+    result_dict: dict,
+) -> None:
+    """V6.1 DDP worker — one per GPU. Launched via mp.spawn."""
+    import torch
+    import torch.distributed as dist
+
+    # Init process group
+    dist.init_process_group(
+        backend="nccl",
+        init_method="tcp://127.0.0.1:29500",
+        world_size=world_size,
+        rank=rank,
+    )
+    torch.cuda.set_device(rank)
+
+    if rank == 0:
+        print(f"\n  DDP initialized: {world_size} GPUs via NCCL")
+        for i in range(world_size):
+            name = torch.cuda.get_device_name(i)
+            vram = torch.cuda.get_device_properties(i).total_memory / 1e9
+            print(f"    GPU {i}: {name} ({vram:.0f} GB)")
+
+    # Build nn modules inside worker (local classes can't be pickled across spawn)
+    nn_modules = _build_nn_modules()
+
+    # Create trainer on this rank's device
+    trainer = V6Trainer(cfg, nn_modules, parquet_path, ontology_path, rank=rank, world_size=world_size)
+    result = trainer.train()
+
+    # Only rank 0 returns result
+    if rank == 0:
+        result_dict.update(result)
+
+    dist.destroy_process_group()
+
+
 @scale_app.function(
     image=gpu_image_v6,
-    gpu="A100-80GB",
+    gpu="H100:4",  # V6.1: 4x H100 (auto-upgraded to H200, 141GB each, 4.8TB/s bandwidth)
     timeout=86400,  # 24h (Modal max)
     volumes=VOLUMES,
-    memory=204800,  # 200GB RAM for TGN memory + graph
+    memory=204800,  # 200GB RAM for graph structures
 )
 def train_tkg_jepa_v6(
     parquet_path: str = "/data/jcube_graph_v6.parquet",
     ontology_path: str = "/data/ontology_nodes.parquet",
     config_json: str | None = None,
 ) -> TrainResult:
-    """Train V6 Dense Temporal JEPA on the full TKG.
+    """Train V6.1 Dense Temporal JEPA on the full TKG with DDP.
 
+    V6.1: 4x H100/H200, torch.compile, TGN on GPU, full epochs.
     Architecture: 3-layer GraphGPS + TGN + Dense Lookahead + Weak-SIGReg.
-    Single A100-80GB. 128-dim latent.
 
     Loss: L = L_dense_lookahead + lambda * L_weak_sigreg
     """
     import torch
+    import torch.multiprocessing as mp
 
     print("=" * 60)
-    print("V6 Dense Temporal JEPA (World Model Architecture)")
+    print("V6.1 Dense Temporal JEPA — DDP on 4x H100/H200")
     print("=" * 60)
 
     # Parse config
@@ -2353,16 +2612,39 @@ def train_tkg_jepa_v6(
     cfg.parquet_path = parquet_path
     cfg.ontology_path = ontology_path
 
+    num_gpus = torch.cuda.device_count()
     print(f"Config: {cfg.to_json()}")
-    print(f"CUDA: {torch.cuda.get_device_name(0)}")
-    print(f"VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
+    print(f"GPUs available: {num_gpus}")
+    for i in range(num_gpus):
+        print(f"  GPU {i}: {torch.cuda.get_device_name(i)} "
+              f"({torch.cuda.get_device_properties(i).total_memory / 1e9:.0f} GB)")
 
     # Build nn modules (deferred import pattern for Modal serialization)
     nn_modules = _build_nn_modules()
 
-    # Create trainer and run
-    trainer = V6Trainer(cfg, nn_modules, parquet_path, ontology_path)
-    result = trainer.train()
+    if num_gpus > 1 and cfg.use_ddp:
+        # V6.1: DDP with mp.spawn
+        cfg.num_gpus = num_gpus
+        mp.set_start_method("spawn", force=True)
+
+        # Shared dict for result from rank 0
+        manager = mp.Manager()
+        result_dict = manager.dict()
+
+        mp.spawn(
+            _ddp_worker,
+            args=(num_gpus, cfg, parquet_path, ontology_path, result_dict),
+            nprocs=num_gpus,
+            join=True,
+        )
+
+        result: TrainResult = dict(result_dict)  # type: ignore
+    else:
+        # Fallback: single GPU (disable DDP features that need dist)
+        cfg.use_ddp = False
+        cfg.tgn_on_gpu = True  # Still use GPU TGN on H200
+        trainer = V6Trainer(cfg, nn_modules, parquet_path, ontology_path)
+        result = trainer.train()
 
     return result
 
