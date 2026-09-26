@@ -1,8 +1,9 @@
-"""JEPA regularizers: SIGReg, WeakSIGReg, and RDMReg.
+"""JEPA regularizers: SIGReg, WeakSIGReg, RDMReg, and NormReg.
 
 These regularizers enforce desirable distributional properties on learned
 embeddings, grounded in the theoretical framework of LeJEPA (arXiv:2511.08544),
-Weak-SIGReg (arXiv:2603.05924), and Rectified LpJEPA (arXiv:2602.01456).
+Weak-SIGReg (arXiv:2603.05924), Rectified LpJEPA (arXiv:2602.01456), and
+BiJEPA (arXiv:2603.00049).
 
 Requires PyTorch. Install with: pip install event-jepa-cube[torch]
 """
@@ -10,7 +11,6 @@ Requires PyTorch. Install with: pip install event-jepa-cube[torch]
 from __future__ import annotations
 
 import math
-from typing import Optional
 
 try:
     import torch
@@ -84,7 +84,7 @@ class SIGReg:
             self.num_quadrature_points,
             device=samples.device,
         )
-        dt = t_points[1] - t_points[0]
+        t_points[1] - t_points[0]
 
         # Empirical CF: phi_hat(t) = (1/N) sum_j exp(i*t*x_j)
         # samples: (N,), t_points: (T,) -> outer product: (N, T)
@@ -159,8 +159,8 @@ class WeakSIGReg:
     def __init__(self, sketch_dim: int = 64) -> None:
         _require_torch()
         self.sketch_dim = sketch_dim
-        self._sketch_matrix: Optional[Tensor] = None
-        self._sketch_dim_source: Optional[int] = None
+        self._sketch_matrix: Tensor | None = None
+        self._sketch_dim_source: int | None = None
 
     def _get_sketch_matrix(self, d: int, device: torch.device) -> Tensor:
         """Get or create the random sketch matrix S in R^{K x d}."""
@@ -301,3 +301,44 @@ class RDMReg:
         loss = ((z_sorted - y_sorted) ** 2).mean()
 
         return loss
+
+
+class NormReg:
+    """Representation-norm regularization (BiJEPA).
+
+    Penalizes deviation of per-sample squared L2 norms from the isotropic
+    Gaussian expectation E[||z||^2] = d. Bidirectional/symmetric prediction
+    (no stop-gradient, no EMA teacher) admits a trivial escape where both
+    predictors inflate embedding norms instead of learning structure —
+    "representation explosion". NormReg closes that escape without
+    constraining the distribution's shape, so it composes with SIGReg /
+    WeakSIGReg / RDMReg rather than competing with them.
+
+    Loss = mean_n ( ||z_n||^2 / d - 1 )^2
+
+    Reference: BiJEPA (arXiv:2603.00049)
+
+    Args:
+        target_scale: Target for the normalized squared norm ||z||^2 / d.
+            Default 1.0 (matches an isotropic standard Gaussian).
+    """
+
+    def __init__(self, target_scale: float = 1.0) -> None:
+        _require_torch()
+        if target_scale <= 0.0:
+            raise ValueError("target_scale must be positive")
+        self.target_scale = target_scale
+
+    def compute_loss(self, embeddings: Tensor) -> Tensor:
+        """Compute NormReg loss on a batch of embeddings.
+
+        Args:
+            embeddings: Tensor of shape (N, d).
+
+        Returns:
+            Scalar loss tensor.
+        """
+        _require_torch()
+        _, d = embeddings.shape
+        normalized_sq_norms = embeddings.pow(2).sum(dim=1) / float(d)
+        return ((normalized_sq_norms - self.target_scale) ** 2).mean()

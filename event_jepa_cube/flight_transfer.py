@@ -4,7 +4,7 @@ Uses PyArrow Flight RPC for zero-copy streaming of embedding vectors,
 bypassing JSON serialization overhead. Supports both Flight SQL (DuckDB)
 and raw Flight (Mycelia) protocols.
 
-Requires ``pyarrow``. Install with: ``pip install pyarrow>=14.0``
+Requires ``pyarrow``. Install with: ``pip install pyarrow>=23.0.1``
 
 Example::
 
@@ -18,7 +18,7 @@ Example::
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
@@ -43,7 +43,7 @@ _VECTOR_SCHEMA_FIELDS = [
 
 def _require_arrow() -> None:
     if not _ARROW_AVAILABLE:
-        raise ImportError("pyarrow is required for Arrow Flight transfer. Install with: pip install pyarrow>=14.0")
+        raise ImportError("pyarrow is required for Arrow Flight transfer. Install with: pip install pyarrow>=23.0.1")
 
 
 def _vector_schema() -> Any:
@@ -88,13 +88,64 @@ class FlightTransfer:
         timeout: Connection timeout in seconds.
     """
 
-    def __init__(self, mycelia_url: str, api_key: str | None = None, timeout: int = 30) -> None:
+    def __init__(
+        self,
+        mycelia_url: str,
+        api_key: str | None = None,
+        timeout: int = 30,
+        *,
+        compression_config: Any | None = None,
+        observation_hook: Callable[[Any], None] | None = None,
+    ) -> None:
         _require_arrow()
+        from event_jepa_cube.flight_compression import FlightCompressionConfig
+
+        self._flight_compression = compression_config or FlightCompressionConfig.from_env()
+        self._observation_hook = observation_hook
         self._mycelia_url = mycelia_url.rstrip("/")
         self._api_key = api_key
         self._timeout = timeout
         self._flight_url = _derive_flight_url(mycelia_url)
         self._client = self._connect()
+
+    def _call_options(self) -> Any:
+        return flight.FlightCallOptions(
+            timeout=self._timeout,
+            write_options=self._flight_compression.options_for("jcube.client.dynamic"),
+        )
+
+    def _collect_reader(self, reader: Any) -> Any:
+        from event_jepa_cube.flight_compression import (
+            FlightIpcDirection,
+            FlightRpcAction,
+            collect_flight_table,
+            logical_nbytes,
+            observe_flight_operation,
+        )
+
+        route = "jcube.client.dynamic"
+        with observe_flight_operation(
+            route=route,
+            codec=self._flight_compression.codec_for(route),
+            direction=FlightIpcDirection.READ,
+            action=FlightRpcAction.DO_GET,
+            hook=self._observation_hook,
+        ) as observation:
+            table = collect_flight_table(reader)
+            observation.add_logical_bytes(logical_nbytes(table))
+            return table
+
+    def _write_observation(self):
+        from event_jepa_cube.flight_compression import FlightIpcDirection, FlightRpcAction, observe_flight_operation
+
+        route = "jcube.client.dynamic"
+        return observe_flight_operation(
+            route=route,
+            codec=self._flight_compression.codec_for(route),
+            direction=FlightIpcDirection.WRITE,
+            action=FlightRpcAction.DO_PUT,
+            hook=self._observation_hook,
+        )
 
     def _connect(self) -> Any:
         """Create a Flight client to the Mycelia Flight endpoint."""
@@ -134,7 +185,7 @@ class FlightTransfer:
         """
         tbl_name = table_name or collection
         descriptor = flight.FlightDescriptor.for_path(collection)
-        options = flight.FlightCallOptions(timeout=self._timeout)
+        options = self._call_options()
 
         # Get flight info for the collection
         try:
@@ -149,8 +200,7 @@ class FlightTransfer:
         endpoint = info.endpoints[0]
         reader = self._client.do_get(endpoint.ticket, options)
 
-        # Read all batches into an Arrow table
-        table = reader.read_all()
+        table = self._collect_reader(reader)
 
         # Register in DuckDB
         conn = connector._ensure_open()
@@ -195,11 +245,8 @@ class FlightTransfer:
         conn = connector._ensure_open()
         result = conn.execute(query)
 
-        # Fetch as Arrow (use to_arrow_table if available, else fall back)
-        if hasattr(result, "to_arrow_table"):
-            arrow_table = result.to_arrow_table()
-        else:
-            arrow_table = result.fetch_arrow_table()
+        # DuckDB exposes Arrow transfer directly without the deprecated fetch API.
+        arrow_table = result.to_arrow_table()
 
         # Rename columns to canonical names if needed
         if id_column != "id" or embedding_column != "embedding":
@@ -212,11 +259,15 @@ class FlightTransfer:
 
         # Upload via Flight do_put
         descriptor = flight.FlightDescriptor.for_path(collection)
-        options = flight.FlightCallOptions(timeout=self._timeout)
+        options = self._call_options()
 
-        writer, _ = self._client.do_put(descriptor, arrow_table.schema, options)
-        writer.write_table(arrow_table)
-        writer.close()
+        with self._write_observation() as observation:
+            writer, _ = self._client.do_put(descriptor, arrow_table.schema, options)
+            try:
+                observation.add_logical_bytes(arrow_table.nbytes)
+                writer.write_table(arrow_table)
+            finally:
+                writer.close()
 
         total = len(arrow_table)
         logger.info(
@@ -250,7 +301,7 @@ class FlightTransfer:
         """
         # Read from source
         descriptor = flight.FlightDescriptor.for_path(source_collection)
-        options = flight.FlightCallOptions(timeout=self._timeout)
+        options = self._call_options()
 
         info = self._client.get_flight_info(descriptor, options)
         if not info.endpoints:
@@ -258,7 +309,7 @@ class FlightTransfer:
 
         endpoint = info.endpoints[0]
         reader = self._client.do_get(endpoint.ticket, options)
-        table = reader.read_all()
+        table = self._collect_reader(reader)
 
         # Apply filter_tag if specified
         if filter_tag is not None and "filter_tag" in table.column_names:
@@ -272,9 +323,13 @@ class FlightTransfer:
 
         # Write to target
         target_descriptor = flight.FlightDescriptor.for_path(target_collection)
-        writer, _ = self._client.do_put(target_descriptor, table.schema, options)
-        writer.write_table(table)
-        writer.close()
+        with self._write_observation() as observation:
+            writer, _ = self._client.do_put(target_descriptor, table.schema, options)
+            try:
+                observation.add_logical_bytes(table.nbytes)
+                writer.write_table(table)
+            finally:
+                writer.close()
 
         total = len(table)
         logger.info(
@@ -300,7 +355,7 @@ class FlightTransfer:
             Number of records exported.
         """
         descriptor = flight.FlightDescriptor.for_path(collection)
-        options = flight.FlightCallOptions(timeout=self._timeout)
+        options = self._call_options()
 
         info = self._client.get_flight_info(descriptor, options)
         if not info.endpoints:
@@ -308,7 +363,7 @@ class FlightTransfer:
 
         endpoint = info.endpoints[0]
         reader = self._client.do_get(endpoint.ticket, options)
-        table = reader.read_all()
+        table = self._collect_reader(reader)
 
         with pa.OSFile(path, "wb") as sink:
             writer = ipc.new_file(sink, table.schema)
@@ -329,16 +384,23 @@ class FlightTransfer:
         Returns:
             Number of records imported.
         """
+        from event_jepa_cube.flight_compression import iter_flight_batches
+
         with pa.OSFile(path, "rb") as source:
             reader = ipc.open_file(source)
-            table = reader.read_all()
+            batches = iter_flight_batches(reader.get_batch(index) for index in range(reader.num_record_batches))
+            table = pa.Table.from_batches(list(batches), schema=reader.schema)
 
         descriptor = flight.FlightDescriptor.for_path(collection)
-        options = flight.FlightCallOptions(timeout=self._timeout)
+        options = self._call_options()
 
-        writer, _ = self._client.do_put(descriptor, table.schema, options)
-        writer.write_table(table)
-        writer.close()
+        with self._write_observation() as observation:
+            writer, _ = self._client.do_put(descriptor, table.schema, options)
+            try:
+                observation.add_logical_bytes(table.nbytes)
+                writer.write_table(table)
+            finally:
+                writer.close()
 
         total = len(table)
         logger.info("Imported %d records from %s into collection %r", total, path, collection)

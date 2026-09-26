@@ -1,0 +1,111 @@
+# jcube V6 training as a Kueue-queued GPU Job.
+#
+# Renders for a Proxmox/K8s lab with heterogeneous GPUs. Substitute the ${...}
+# placeholders (envsubst, or your send-gpu-job renderer).
+#
+# NODE PLACEMENT: the `nvidia.com/gpu` request is what keeps this off CPU-only
+# nodes — a node advertising 0 GPU units can never satisfy it. Do NOT try to
+# pin this to a storage/CPU node; it will sit Pending forever.
+#
+# GPU sizing (this lab):
+#   r740   A5000 24GB + RTX 8000 48GB   <- most VRAM; RTX 8000 is Turing, NO bf16
+#   r770   L4 24GB                      <- Ada, bf16 OK
+#   5860   RTX 4000 Ada 20GB            <- Ada, bf16 OK
+# The runner auto-downgrades amp_dtype to float16 on pre-Ampere devices, so a
+# Turing placement is safe but slower.
+#
+# The full 35.2M-node graph needs ~27GB of static VRAM before activations and
+# does not fit any single GPU here. Use a hospital_filter subgraph.
+#
+# ARTIFACTS: checkpoints are tens of GB per epoch. Mount a volume with real
+# headroom — never a root disk near capacity, and prefer a healthy pool.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ${JOB_NAME}
+  namespace: ${NAMESPACE}
+  labels:
+    kueue.x-k8s.io/queue-name: ${QUEUE}
+    app: jcube-train
+spec:
+  suspend: true # Kueue admits the job; do not start before it is scheduled
+  backoffLimit: 0 # training is not idempotent mid-epoch; fail loudly instead
+  template:
+    metadata:
+      labels:
+        app: jcube-train
+    spec:
+      restartPolicy: Never
+      runtimeClassName: ${RUNTIME_CLASS}
+      tolerations:
+        - key: ${GPU_POOL_TAINT_KEY}
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: trainer
+          image: ${IMAGE}
+          command: ["python", "-m", "event_jepa_cube.train_local"]
+          args:
+            - --parquet-path=/data/jcube_graph_v6.parquet
+            - --ontology-path=/data/ontology_nodes.parquet
+            - --artifact-dir=/artifacts/tkg-v6.2
+            - --min-free-gb=${MIN_FREE_GB}
+            - --config=${TRAIN_CONFIG}
+          env:
+            # Pin NCCL to the GPU fabric interface; without this it can pick
+            # the management NIC and collapse multi-GPU throughput.
+            - name: NCCL_SOCKET_IFNAME
+              value: ${NCCL_IFNAME}
+            - name: PYTORCH_CUDA_ALLOC_CONF
+              value: expandable_segments:True
+            # Surface NCCL init problems instead of hanging silently.
+            - name: NCCL_DEBUG
+              value: WARN
+          resources:
+            limits:
+              nvidia.com/gpu: ${GPU_COUNT}
+            requests:
+              cpu: ${CPU_REQUEST}
+              memory: ${MEM_REQUEST}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+              readOnly: true
+            - name: artifacts
+              mountPath: /artifacts
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: ${DATA_PVC}
+        - name: artifacts
+          persistentVolumeClaim:
+            claimName: ${ARTIFACTS_PVC}
+---
+# Cheap image check — run this FIRST, on the same image and pool, before
+# committing GPU hours. Verifies CUDA visibility and that pyg_lib is active
+# (a missing pyg_lib silently demotes NeighborLoader to the Python sampler).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ${JOB_NAME}-imagecheck
+  namespace: ${NAMESPACE}
+  labels:
+    kueue.x-k8s.io/queue-name: ${QUEUE}
+spec:
+  suspend: true
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      runtimeClassName: ${RUNTIME_CLASS}
+      tolerations:
+        - key: ${GPU_POOL_TAINT_KEY}
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: check
+          image: ${IMAGE}
+          command: ["python", "-m", "event_jepa_cube.train_local", "--check-image"]
+          resources:
+            limits:
+              nvidia.com/gpu: 1

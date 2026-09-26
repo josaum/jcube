@@ -33,7 +33,7 @@ import random
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 logger = logging.getLogger(__name__)
 
@@ -365,7 +365,7 @@ class GEPASearch:
             dist = _euclidean_distance(final_query, vec)
             scored_vectors.append({"id": vid, "distance": dist, "score": sim})
 
-        scored_vectors.sort(key=lambda x: x["score"], reverse=True)
+        scored_vectors.sort(key=lambda x: cast(float, x["score"]), reverse=True)
         top_results = scored_vectors[:limit]
 
         return GEPAResult(

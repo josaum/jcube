@@ -17,9 +17,16 @@ The orchestrator gracefully degrades when components are unavailable.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from .bandit import BanditClient
+    from .cascade import ForecastCascade
+    from .duckdb_connector import DuckDBConnector
+    from .mycelia_store import MyceliaStore
+    from .streaming import StreamingJEPA
 
 
 class Pipeline:
@@ -57,11 +64,12 @@ class Pipeline:
     ) -> None:
         self._source_table = source_table
         self._entities_table = entities_table
-        self._connector = None
-        self._mycelia = None
-        self._bandit = None
-        self._cascade = None
-        self._streaming: dict[str, Any] = {}
+        self._connector: DuckDBConnector | None = None
+        self._mycelia: MyceliaStore | None = None
+        self._mycelia_scope: dict[str, Any] = {}
+        self._bandit: BanditClient | None = None
+        self._cascade: ForecastCascade | None = None
+        self._streaming: dict[str, StreamingJEPA] = {}
 
         if duckdb_config:
             self._init_duckdb(duckdb_config)
@@ -85,8 +93,15 @@ class Pipeline:
     def _init_mycelia(self, config: dict[str, Any]) -> None:
         from .mycelia_store import MyceliaStore
 
-        self._mycelia = MyceliaStore(**config)
-        logger.info("MyceliaStore initialized: %s", config.get("base_url"))
+        runtime_config = dict(config)
+        self._mycelia_scope = {
+            key: runtime_config.pop(key)
+            for key in ("tenant_id", "repo", "rev")
+            if key in runtime_config and runtime_config[key] is not None
+        }
+        runtime_config.setdefault("vector_ingest_transport", "flight")
+        self._mycelia = MyceliaStore(**runtime_config)
+        logger.info("MyceliaStore initialized: %s", runtime_config.get("base_url"))
 
     def _init_bandit(self, config: dict[str, Any]) -> None:
         from .bandit import BanditClient
@@ -97,10 +112,47 @@ class Pipeline:
     def _init_cascade(self, levels: list[dict[str, Any]]) -> None:
         from .cascade import CascadeLevel, ForecastCascade
 
+        if self._connector is None:
+            raise PipelineError("DuckDB connector must be configured before cascade setup")
         self._cascade = ForecastCascade(self._connector, source_table=self._source_table)
         for level_cfg in levels:
             self._cascade.add_level(CascadeLevel(**level_cfg))
         logger.info("ForecastCascade initialized with %d levels", len(levels))
+
+    def _normalize_pipeline_result(self, result: Any) -> dict[str, Any]:
+        """Normalize connector/materializer results to a dict for callers."""
+        try:
+            from .materializer import MaterializationResult, result_to_dict
+
+            if isinstance(result, MaterializationResult):
+                return result_to_dict(result)
+        except ImportError:
+            pass
+
+        if isinstance(result, dict):
+            return result
+
+        raise PipelineError(f"Unsupported pipeline result type: {type(result)!r}")
+
+    def _build_mycelia_sync_payload(self, result: Any) -> dict[str, Any]:
+        """Build the richest Mycelia sync payload available for the result."""
+        try:
+            from .materializer import MaterializationResult, result_to_mycelia_payloads
+
+            if isinstance(result, MaterializationResult):
+                return result_to_mycelia_payloads(
+                    result,
+                    tenant_id=self._mycelia_scope.get("tenant_id"),
+                    repo=self._mycelia_scope.get("repo"),
+                    rev=self._mycelia_scope.get("rev"),
+                )
+        except ImportError:
+            pass
+
+        if isinstance(result, dict):
+            return result
+
+        raise PipelineError(f"Unsupported pipeline sync payload type: {type(result)!r}")
 
     # ------------------------------------------------------------------
     # Data ingestion
@@ -126,7 +178,11 @@ class Pipeline:
             raise PipelineError("DuckDB connector not configured")
 
         tbl_list = tables or [self._source_table]
-        return self._connector.run_from_sources(sources, tbl_list)
+        source_configs = [
+            {"name": name, "connection_string": connection_string}
+            for name, connection_string in sources.items()
+        ]
+        return self._connector.run_from_sources(source_configs, tbl_list)
 
     def ingest_from_mycelia(
         self,
@@ -180,10 +236,11 @@ class Pipeline:
         ent_tbl = entities_table or self._entities_table
 
         # 1. Run batch pipeline
-        result = self._connector.run_pipeline(
+        raw_result = self._connector.run_pipeline(
             sequences_table=seq_tbl,
             entities_table=ent_tbl,
         )
+        result = self._normalize_pipeline_result(raw_result)
         logger.info(
             "Pipeline complete: %d representations, %d predictions",
             len(result.get("representations", {})),
@@ -192,10 +249,14 @@ class Pipeline:
 
         # 2. Sync to Mycelia if configured
         if sync_to_mycelia and self._mycelia:
+            sync_payload = self._build_mycelia_sync_payload(raw_result)
             sync_result = self._mycelia.sync_pipeline_results(
-                result,
+                sync_payload,
                 representations_collection=representations_collection or f"{seq_tbl}_representations",
                 predictions_collection=predictions_collection or f"{seq_tbl}_predictions",
+                tenant_id=self._mycelia_scope.get("tenant_id"),
+                repo=self._mycelia_scope.get("repo"),
+                rev=self._mycelia_scope.get("rev"),
             )
             result["mycelia_sync"] = sync_result
             logger.info("Synced to Mycelia: %s", sync_result)
@@ -247,7 +308,7 @@ class Pipeline:
         embedding_dim: int | None = None,
         alpha: float = 1.0,
         window_size: int | None = None,
-    ) -> Any:
+    ) -> StreamingJEPA:
         """Get or create a StreamingJEPA for a given stream.
 
         Args:
@@ -262,7 +323,7 @@ class Pipeline:
         from .streaming import StreamingJEPA
 
         if stream_id not in self._streaming:
-            dim = embedding_dim or (self._connector.embedding_dim if self._connector else 768)
+            dim = embedding_dim or (self._connector._jepa.embedding_dim if self._connector else 768)
             self._streaming[stream_id] = StreamingJEPA(embedding_dim=dim, alpha=alpha, window_size=window_size)
         return self._streaming[stream_id]
 
@@ -323,6 +384,8 @@ class Pipeline:
         """
         from .gepa import GEPASearch
 
+        if self._mycelia is None:
+            raise PipelineError("MyceliaStore not configured")
         gepa = GEPASearch(
             base_url=self._mycelia._base_url,
             api_key=self._mycelia._api_key,

@@ -18,9 +18,9 @@ __all__ = [
 
 # Regularizers are optional (require PyTorch)
 try:
-    from .regularizers import RDMReg, SIGReg, WeakSIGReg
+    from .regularizers import NormReg, RDMReg, SIGReg, WeakSIGReg
 
-    __all__ += ["SIGReg", "WeakSIGReg", "RDMReg"]
+    __all__ += ["SIGReg", "WeakSIGReg", "RDMReg", "NormReg"]
 except ImportError:
     pass
 
@@ -29,6 +29,14 @@ try:
     from .predictors import MLPPredictor, PredictorTrainer, TransformerPredictor
 
     __all__ += ["MLPPredictor", "TransformerPredictor", "PredictorTrainer"]
+except ImportError:
+    pass
+
+# Bidirectional cycle-consistent JEPA training is optional (requires PyTorch)
+try:
+    from .bijepa import BiJEPATrainer
+
+    __all__ += ["BiJEPATrainer"]
 except ImportError:
     pass
 
@@ -60,6 +68,29 @@ except ImportError:
 from .mycelia_store import MyceliaError, MyceliaStore
 
 __all__ += ["MyceliaStore", "MyceliaError"]
+
+# LEIO/Code ingestion adapters (no external deps)
+from .code_ingestion import (
+    build_code_symbol_payloads,
+    build_embeddings_by_symbol_from_vocab,
+    infer_code_language,
+    load_embedding_matrix,
+    load_leio_query_cache,
+    load_node_vocab,
+    sync_leio_query_cache_from_artifacts,
+    sync_leio_query_cache_to_mycelia,
+)
+
+__all__ += [
+    "load_leio_query_cache",
+    "load_node_vocab",
+    "load_embedding_matrix",
+    "infer_code_language",
+    "build_code_symbol_payloads",
+    "build_embeddings_by_symbol_from_vocab",
+    "sync_leio_query_cache_from_artifacts",
+    "sync_leio_query_cache_to_mycelia",
+]
 
 # Streaming JEPA (no external deps)
 from .streaming import StreamBuffer, StreamingJEPA
@@ -107,8 +138,8 @@ except ImportError:
 
 # Materializer is optional (requires duckdb + pyarrow)
 try:
-    from .materializer import Materializer, MaterializationResult
+    from .materializer import MaterializationResult, Materializer, result_to_mycelia_payloads
 
-    __all__ += ["Materializer", "MaterializationResult"]
+    __all__ += ["Materializer", "MaterializationResult", "result_to_mycelia_payloads"]
 except ImportError:
     pass

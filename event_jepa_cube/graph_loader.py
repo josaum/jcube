@@ -209,7 +209,7 @@ class EntityGraph:
                         f'AND "{ts_col}" IS NOT NULL '
                         f'ORDER BY "{ts_col}" '
                         f'LIMIT {max_events_per_type}'
-                    ).fetch_arrow_table()
+                    ).to_arrow_table()
                 except Exception:
                     continue
 

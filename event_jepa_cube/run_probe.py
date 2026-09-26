@@ -14,9 +14,9 @@ probe_image = (
     .pip_install(
         "torch>=2.6",
         "numpy>=2.0",
-        "pyarrow>=18.0",
+        "pyarrow>=23.0.1",
         "scikit-learn>=1.4",
-        "duckdb>=1.0.0",
+        "duckdb>=1.5.2",
     )
 )
 

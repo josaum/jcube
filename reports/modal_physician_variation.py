@@ -56,8 +56,8 @@ report_image = (
     .pip_install(
         "torch>=2.2",
         "numpy>=1.26",
-        "duckdb>=1.2.0",
-        "pyarrow>=18.0",
+        "duckdb>=1.5.2",
+        "pyarrow>=23.0.1",
         "scikit-learn>=1.4",
     )
 )

@@ -16,6 +16,49 @@ import torch.nn as nn
 from torch import Tensor
 
 
+def make_sliding_windows(
+    sequences: list[Any],
+    context_length: int,
+    num_steps: int,
+) -> tuple[Tensor, Tensor]:
+    """Create sliding (context, target) windows from event sequences.
+
+    Args:
+        sequences: List of EventSequence objects or raw list[list[float]] embeddings.
+        context_length: Number of embeddings per context window.
+        num_steps: Number of embeddings per target window.
+
+    Returns:
+        Tuple of (contexts_tensor, targets_tensor) with shapes
+        (N, context_length, dim) and (N, num_steps, dim).
+    """
+    all_contexts: list[list[list[float]]] = []
+    all_targets: list[list[list[float]]] = []
+
+    for seq in sequences:
+        # Extract embeddings from EventSequence or raw list
+        if hasattr(seq, "embeddings"):
+            embeddings = seq.embeddings
+        else:
+            embeddings = seq
+
+        # Create sliding windows
+        total_needed = context_length + num_steps
+        for i in range(len(embeddings) - total_needed + 1):
+            context_window = embeddings[i : i + context_length]
+            target_window = embeddings[i + context_length : i + context_length + num_steps]
+            all_contexts.append(context_window)
+            all_targets.append(target_window)
+
+    if not all_contexts:
+        return torch.zeros(0, context_length, 1), torch.zeros(0, num_steps, 1)
+
+    contexts_tensor = torch.tensor(all_contexts, dtype=torch.float32)
+    targets_tensor = torch.tensor(all_targets, dtype=torch.float32)
+
+    return contexts_tensor, targets_tensor
+
+
 class MLPPredictor(nn.Module):
     """MLP-based sequence predictor for EventJEPA.
 
@@ -305,31 +348,7 @@ class PredictorTrainer:
         ctx_len = context_length if context_length is not None else self._get_context_length()
         num_steps = self._get_num_steps()
 
-        all_contexts: list[list[list[float]]] = []
-        all_targets: list[list[list[float]]] = []
-
-        for seq in sequences:
-            # Extract embeddings from EventSequence or raw list
-            if hasattr(seq, "embeddings"):
-                embeddings = seq.embeddings
-            else:
-                embeddings = seq
-
-            # Create sliding windows
-            total_needed = ctx_len + num_steps
-            for i in range(len(embeddings) - total_needed + 1):
-                context_window = embeddings[i : i + ctx_len]
-                target_window = embeddings[i + ctx_len : i + ctx_len + num_steps]
-                all_contexts.append(context_window)
-                all_targets.append(target_window)
-
-        if not all_contexts:
-            return torch.zeros(0, ctx_len, 1), torch.zeros(0, num_steps, 1)
-
-        contexts_tensor = torch.tensor(all_contexts, dtype=torch.float32)
-        targets_tensor = torch.tensor(all_targets, dtype=torch.float32)
-
-        return contexts_tensor, targets_tensor
+        return make_sliding_windows(sequences, ctx_len, num_steps)
 
     def train(
         self,

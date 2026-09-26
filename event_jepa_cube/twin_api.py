@@ -18,10 +18,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
+import threading
 import time
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Any
+from dataclasses import dataclass, field
+from typing import Any, cast
 
 import numpy as np
 from fastapi import FastAPI, HTTPException, Query
@@ -35,21 +39,133 @@ from .materializer import Materializer, result_to_dict
 # State
 # ---------------------------------------------------------------------------
 
-_twins: dict[str, DigitalTwin] = {}        # db_path → twin
-_snapshots: dict[str, dict[str, Any]] = {} # db_path → serialized snapshot
-_materializers: dict[str, Materializer] = {}  # db_path → materializer
-_active_db: str | None = None
+logger = logging.getLogger(__name__)
 
-# Catalog state — loaded once, keyed by catalog path
-_catalogs: dict[str, dict[str, Any]] = {}  # catalog_path → {"meta": ..., "tables": {name: entry}}
 
-# Embedding state — lazy loaded on first request
-_emb_data: dict[str, Any] = {}  # "embeddings", "node_names", "node_to_idx", "dim", "loaded"
+@dataclass(slots=True)
+class TwinApiConfig:
+    mode: str = "local"
+    allow_connect: bool = True
+    require_explicit_db: bool = False
+    allow_origins: list[str] = field(default_factory=lambda: ["*"])
+    allowed_db_roots: list[str] = field(default_factory=list)
+
+
+@dataclass
+class TwinApiState:
+    config: TwinApiConfig
+    twins: dict[str, DigitalTwin] = field(default_factory=dict)
+    snapshots: dict[str, dict[str, Any]] = field(default_factory=dict)
+    materializers: dict[str, Materializer] = field(default_factory=dict)
+    catalogs: dict[str, dict[str, Any]] = field(default_factory=dict)
+    emb_data: dict[str, Any] = field(default_factory=dict)
+    active_db: str | None = None
+    lock: threading.RLock = field(default_factory=threading.RLock)
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_list(name: str) -> list[str]:
+    raw = os.getenv(name, "")
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+def load_runtime_config_from_env() -> TwinApiConfig:
+    """Build runtime config from environment variables."""
+    mode = os.getenv("JCUBE_TWIN_API_MODE", "local").strip().lower() or "local"
+    if mode not in {"local", "server"}:
+        raise ValueError(f"Unsupported JCUBE_TWIN_API_MODE: {mode}")
+
+    allow_origins = _env_list("JCUBE_TWIN_API_ALLOWED_ORIGINS")
+    if not allow_origins and mode == "local":
+        allow_origins = ["*"]
+
+    return TwinApiConfig(
+        mode=mode,
+        allow_connect=_env_flag("JCUBE_TWIN_API_ALLOW_CONNECT", default=(mode == "local")),
+        require_explicit_db=_env_flag("JCUBE_TWIN_API_REQUIRE_DB_PATH", default=(mode == "server")),
+        allow_origins=allow_origins,
+        allowed_db_roots=[os.path.realpath(root) for root in _env_list("JCUBE_TWIN_API_ALLOWED_DB_ROOTS")],
+    )
+
+
+_runtime = TwinApiState(config=load_runtime_config_from_env())
 
 # CLI-configured paths (set in main() before server starts)
 _default_catalog_path: str = "data/ai_friendly_catalog.json"
 _default_graph_path: str = "data/jcube_graph.parquet"
 _default_weights_path: str = "data/weights/node_emb_epoch_2.pt"
+
+
+def _state() -> TwinApiState:
+    return _runtime
+
+
+def reset_runtime_state(*, clear_catalogs: bool = True, clear_embeddings: bool = True) -> None:
+    """Close open resources and reset mutable runtime state."""
+    state = _state()
+    with state.lock:
+        for twin in state.twins.values():
+            twin.close()
+        for mat in state.materializers.values():
+            mat.close()
+        state.twins.clear()
+        state.snapshots.clear()
+        state.materializers.clear()
+        state.active_db = None
+        if clear_catalogs:
+            state.catalogs.clear()
+        if clear_embeddings:
+            state.emb_data.clear()
+
+
+def configure_runtime(
+    *,
+    mode: str | None = None,
+    allow_connect: bool | None = None,
+    require_explicit_db: bool | None = None,
+    allowed_db_roots: list[str] | None = None,
+    reset_state: bool = True,
+) -> TwinApiConfig:
+    """Update runtime config, primarily for tests and controlled startup."""
+    if reset_state:
+        reset_runtime_state(clear_catalogs=False, clear_embeddings=False)
+
+    state = _state()
+    config = state.config
+    new_mode = mode or config.mode
+    if new_mode not in {"local", "server"}:
+        raise ValueError(f"Unsupported runtime mode: {new_mode}")
+
+    state.config = TwinApiConfig(
+        mode=new_mode,
+        allow_connect=config.allow_connect if allow_connect is None else allow_connect,
+        require_explicit_db=config.require_explicit_db if require_explicit_db is None else require_explicit_db,
+        allow_origins=list(config.allow_origins),
+        allowed_db_roots=(
+            list(config.allowed_db_roots)
+            if allowed_db_roots is None
+            else [os.path.realpath(root) for root in allowed_db_roots]
+        ),
+    )
+    return state.config
+
+
+def _validate_db_path_access(db_path: str) -> str:
+    """Validate path access against configured allowed roots."""
+    resolved = os.path.realpath(db_path)
+    roots = _state().config.allowed_db_roots
+    if not roots:
+        return resolved
+    for root in roots:
+        if resolved == root or resolved.startswith(f"{root}{os.sep}"):
+            return resolved
+    raise HTTPException(403, "db_path is outside the configured allowed roots")
 
 
 # ---------------------------------------------------------------------------
@@ -59,8 +175,9 @@ _default_weights_path: str = "data/weights/node_emb_epoch_2.pt"
 
 def _load_catalog(catalog_path: str) -> dict[str, Any]:
     """Load and index catalog from JSON file. Returns {"meta": ..., "tables": {name: entry}}."""
-    if catalog_path in _catalogs:
-        return _catalogs[catalog_path]
+    state = _state()
+    if catalog_path in state.catalogs:
+        return state.catalogs[catalog_path]
 
     if not os.path.exists(catalog_path):
         raise FileNotFoundError(f"Catalog not found: {catalog_path}")
@@ -75,7 +192,7 @@ def _load_catalog(catalog_path: str) -> dict[str, Any]:
         "meta": {k: v for k, v in raw.items() if k != "tables"},
         "tables": tables_by_name,
     }
-    _catalogs[catalog_path] = result
+    state.catalogs[catalog_path] = result
     return result
 
 
@@ -117,16 +234,17 @@ def _load_embeddings(
     weights_path: str | None = None,
 ) -> None:
     """Load embeddings lazily on first request."""
-    if _emb_data.get("loaded"):
+    state = _state()
+    if state.emb_data.get("loaded"):
         return
 
     gp = graph_path or _default_graph_path
     wp = weights_path or _default_weights_path
 
-    import torch
-    import pyarrow.parquet as pq
     import pyarrow as pa
     import pyarrow.compute as pc
+    import pyarrow.parquet as pq
+    import torch
 
     print(f"Loading embedding graph vocabulary from {gp}...")
     t0 = time.time()
@@ -153,16 +271,16 @@ def _load_embeddings(
         node_names = node_names[:n]
         embeddings = embeddings[:n]
 
-    _emb_data["embeddings"] = embeddings
-    _emb_data["node_names"] = node_names
-    _emb_data["node_to_idx"] = {str(name): i for i, name in enumerate(node_names)}
-    _emb_data["dim"] = embeddings.shape[1]
-    _emb_data["loaded"] = True
+    state.emb_data["embeddings"] = embeddings
+    state.emb_data["node_names"] = node_names
+    state.emb_data["node_to_idx"] = {str(name): i for i, name in enumerate(node_names)}
+    state.emb_data["dim"] = embeddings.shape[1]
+    state.emb_data["loaded"] = True
     print(f"Embeddings loaded: {embeddings.shape} in {time.time() - t0:.1f}s")
 
 
 def _ensure_embeddings() -> None:
-    if not _emb_data.get("loaded"):
+    if not _state().emb_data.get("loaded"):
         _load_embeddings()
 
 
@@ -172,15 +290,9 @@ def _ensure_embeddings() -> None:
 
 
 @asynccontextmanager
-async def _lifespan(app: FastAPI):  # type: ignore[type-arg]
+async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     yield
-    for twin in _twins.values():
-        twin.close()
-    for mat in _materializers.values():
-        mat.close()
-    _twins.clear()
-    _snapshots.clear()
-    _materializers.clear()
+    reset_runtime_state()
 
 
 # ---------------------------------------------------------------------------
@@ -197,7 +309,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_state().config.allow_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -258,33 +370,42 @@ class VectorSearchRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def _get_materializer(db_path: str | None = None) -> Materializer:
-    global _active_db
-    path = db_path or _active_db
-    if path is None:
+def _resolve_db_path(db_path: str | None) -> str:
+    state = _state()
+    if db_path:
+        return _validate_db_path_access(db_path)
+    if state.config.require_explicit_db:
+        raise HTTPException(400, "db_path is required in server mode")
+    if state.active_db is None:
         raise HTTPException(404, "No database connected. POST /twin/connect first.")
-    if path not in _materializers:
+    return state.active_db
+
+
+def _get_materializer(db_path: str | None = None) -> Materializer:
+    state = _state()
+    path = _resolve_db_path(db_path)
+    if path not in state.materializers:
         mat = Materializer(path, read_only=True)
         mat.connect()
         mat.scan()
-        _materializers[path] = mat
-    return _materializers[path]
+        state.materializers[path] = mat
+    return state.materializers[path]
 
 
 def _get_twin(db_path: str | None = None) -> DigitalTwin:
-    global _active_db
-    path = db_path or _active_db
-    if path is None or path not in _twins:
+    state = _state()
+    path = _resolve_db_path(db_path)
+    if path not in state.twins:
         raise HTTPException(404, "No twin connected. POST /twin/connect first.")
-    return _twins[path]
+    return state.twins[path]
 
 
 def _get_snapshot(db_path: str | None = None) -> dict[str, Any]:
-    global _active_db
-    path = db_path or _active_db
-    if path is None or path not in _snapshots:
+    state = _state()
+    path = _resolve_db_path(db_path)
+    if path not in state.snapshots:
         raise HTTPException(404, "No snapshot built. POST /twin/connect first.")
-    return _snapshots[path]
+    return state.snapshots[path]
 
 
 def _resolve_catalog_path(catalog_path: str | None) -> str | None:
@@ -309,15 +430,21 @@ async def connect(req: ConnectRequest) -> dict[str, Any]:
     FK relationships and domain groups are loaded from it instead of being
     discovered at runtime — much faster for large warehouses.
     """
-    global _active_db
+    state = _state()
+    if not state.config.allow_connect:
+        raise HTTPException(403, "POST /twin/connect is disabled in server mode")
+    if not req.read_only:
+        raise HTTPException(400, "Writable database connections are disabled; use read_only=true")
 
-    if req.db_path in _twins:
-        _twins[req.db_path].close()
+    resolved_db_path = _validate_db_path_access(req.db_path)
+
+    if resolved_db_path in state.twins:
+        state.twins[resolved_db_path].close()
 
     effective_catalog = _resolve_catalog_path(req.catalog_path)
     use_catalog = effective_catalog is not None
 
-    twin = DigitalTwin(req.db_path, read_only=req.read_only)
+    twin = DigitalTwin(resolved_db_path, read_only=True)
     loop = asyncio.get_event_loop()
 
     # Build twin; skip FK discovery when catalog provides them
@@ -356,9 +483,10 @@ async def connect(req: ConnectRequest) -> dict[str, Any]:
             # Non-fatal: log and continue with whatever was built
             print(f"WARNING: Failed to overlay catalog from {effective_catalog}: {exc}")
 
-    _twins[req.db_path] = twin
-    _snapshots[req.db_path] = serialized
-    _active_db = req.db_path
+    state.twins[resolved_db_path] = twin
+    state.snapshots[resolved_db_path] = serialized
+    if not state.config.require_explicit_db:
+        state.active_db = resolved_db_path
 
     domain_summary = {
         k: {"table_count": len(v["tables"]) if isinstance(v.get("tables"), list) else 0,
@@ -369,7 +497,7 @@ async def connect(req: ConnectRequest) -> dict[str, Any]:
 
     return {
         "status": "connected",
-        "db_path": req.db_path,
+        "db_path": resolved_db_path,
         "db_size_mb": snapshot.db_size_mb,
         "total_tables": snapshot.total_tables,
         "total_rows": snapshot.total_rows,
@@ -381,6 +509,7 @@ async def connect(req: ConnectRequest) -> dict[str, Any]:
         "catalog_path": effective_catalog,
         "fingerprint": snapshot.fingerprint,
         "build_duration_s": snapshot.build_duration_s,
+        "mode": state.config.mode,
     }
 
 
@@ -435,7 +564,7 @@ async def get_table(table_name: str, db_path: str | None = None) -> dict[str, An
     snap = _get_snapshot(db_path)
     if table_name not in snap["tables"]:
         raise HTTPException(404, f"Table '{table_name}' not found")
-    return snap["tables"][table_name]
+    return cast(dict[str, Any], snap["tables"][table_name])
 
 
 @app.get("/twin/table/{table_name}/sample")
@@ -448,8 +577,8 @@ async def sample_table(
     twin = _get_twin(db_path)
     try:
         rows = twin.table_sample(table_name, limit=limit)
-    except Exception as e:
-        raise HTTPException(400, str(e))
+    except Exception as exc:
+        raise HTTPException(400, str(exc)) from exc
     return {"table": table_name, "count": len(rows), "rows": rows}
 
 
@@ -457,7 +586,7 @@ async def sample_table(
 async def list_domains(db_path: str | None = None) -> dict[str, Any]:
     """List all domain groups / categories with their tables and stats."""
     snap = _get_snapshot(db_path)
-    return snap["domain_groups"]
+    return cast(dict[str, Any], snap["domain_groups"])
 
 
 @app.get("/twin/foreign-keys")
@@ -475,7 +604,7 @@ async def list_foreign_keys(
     if table:
         fks = [fk for fk in fks if table in (fk.get("from_table", ""), fk.get("to_table", ""))]
 
-    return fks
+    return cast(list[dict[str, Any]], fks)
 
 
 @app.get("/twin/sources")
@@ -494,7 +623,10 @@ async def run_query(req: QueryRequest) -> dict[str, Any]:
     twin = _get_twin(req.db_path)
     try:
         loop = asyncio.get_event_loop()
-        arrow = await loop.run_in_executor(None, lambda: twin.query_arrow(req.sql))
+        arrow = await loop.run_in_executor(
+            None,
+            lambda: twin.query_arrow(req.sql, validate_read_only_query=True),
+        )
         if len(arrow) > req.limit:
             arrow = arrow.slice(0, req.limit)
         rows = arrow.to_pylist()
@@ -504,8 +636,8 @@ async def run_query(req: QueryRequest) -> dict[str, Any]:
             "columns": arrow.schema.names,
             "rows": rows,
         }
-    except Exception as e:
-        raise HTTPException(400, f"Query error: {e}")
+    except Exception as exc:
+        raise HTTPException(400, f"Query error: {exc}") from exc
 
 
 @app.get("/twin/graph")
@@ -602,12 +734,12 @@ async def get_catalog_entry(
     try:
         catalog = _load_catalog(effective)
     except FileNotFoundError as exc:
-        raise HTTPException(404, str(exc))
+        raise HTTPException(404, str(exc)) from exc
 
     entry = catalog["tables"].get(name)
     if entry is None:
         raise HTTPException(404, f"Table '{name}' not found in catalog")
-    return entry
+    return cast(dict[str, Any], entry)
 
 
 @app.get("/twin/catalog/meta")
@@ -621,8 +753,8 @@ async def get_catalog_meta(
     try:
         catalog = _load_catalog(effective)
     except FileNotFoundError as exc:
-        raise HTTPException(404, str(exc))
-    return catalog["meta"]
+        raise HTTPException(404, str(exc)) from exc
+    return cast(dict[str, Any], catalog["meta"])
 
 
 @app.get("/twin/catalog/categories")
@@ -636,8 +768,8 @@ async def get_catalog_categories(
     try:
         catalog = _load_catalog(effective)
     except FileNotFoundError as exc:
-        raise HTTPException(404, str(exc))
-    return _catalog_to_domain_groups(catalog)
+        raise HTTPException(404, str(exc)) from exc
+    return cast(dict[str, Any], _catalog_to_domain_groups(catalog))
 
 
 # ---------------------------------------------------------------------------
@@ -765,9 +897,10 @@ async def embedding_info() -> dict[str, Any]:
     """Get embedding metadata (triggers lazy load)."""
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(None, _ensure_embeddings)
+    emb_data = _state().emb_data
     return {
-        "num_nodes": len(_emb_data["node_names"]),
-        "dim": _emb_data["dim"],
+        "num_nodes": len(emb_data["node_names"]),
+        "dim": emb_data["dim"],
         "loaded": True,
     }
 
@@ -787,9 +920,10 @@ async def find_similar(
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(None, _ensure_embeddings)
 
-    embeddings: np.ndarray = _emb_data["embeddings"]
-    node_names: np.ndarray = _emb_data["node_names"]
-    node_to_idx: dict[str, int] = _emb_data["node_to_idx"]
+    emb_data = _state().emb_data
+    embeddings: np.ndarray = emb_data["embeddings"]
+    node_names: np.ndarray = emb_data["node_names"]
+    node_to_idx: dict[str, int] = emb_data["node_to_idx"]
 
     if node_id not in node_to_idx:
         raise HTTPException(404, f"Node '{node_id}' not found in embedding space")
@@ -840,8 +974,9 @@ async def find_anomalies(
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(None, _ensure_embeddings)
 
-    embeddings: np.ndarray = _emb_data["embeddings"]
-    node_names: np.ndarray = _emb_data["node_names"]
+    emb_data = _state().emb_data
+    embeddings: np.ndarray = emb_data["embeddings"]
+    node_names: np.ndarray = emb_data["node_names"]
 
     matches = []
     for i, name in enumerate(node_names):
@@ -894,15 +1029,16 @@ async def search_by_vector(req: VectorSearchRequest) -> dict[str, Any]:
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(None, _ensure_embeddings)
 
+    emb_data = _state().emb_data
     query_vec = np.array(req.vector, dtype=np.float32).reshape(1, -1)
-    if query_vec.shape[1] != _emb_data["dim"]:
+    if query_vec.shape[1] != emb_data["dim"]:
         raise HTTPException(
             400,
-            f"Vector dim {query_vec.shape[1]} does not match embedding dim {_emb_data['dim']}",
+            f"Vector dim {query_vec.shape[1]} does not match embedding dim {emb_data['dim']}",
         )
 
-    embeddings: np.ndarray = _emb_data["embeddings"]
-    node_names: np.ndarray = _emb_data["node_names"]
+    embeddings: np.ndarray = emb_data["embeddings"]
+    node_names: np.ndarray = emb_data["node_names"]
     nq = float(np.linalg.norm(query_vec).clip(min=1e-8))
 
     if req.entity_type:
@@ -987,12 +1123,13 @@ async def get_embedding(node_id: str) -> dict[str, Any]:
     loop = asyncio.get_event_loop()
     await loop.run_in_executor(None, _ensure_embeddings)
 
-    node_to_idx: dict[str, int] = _emb_data["node_to_idx"]
+    emb_data = _state().emb_data
+    node_to_idx: dict[str, int] = emb_data["node_to_idx"]
     if node_id not in node_to_idx:
         raise HTTPException(404, f"Node '{node_id}' not found in embedding space")
 
     idx = node_to_idx[node_id]
-    vec = _emb_data["embeddings"][idx]
+    vec = emb_data["embeddings"][idx]
     return {
         "node_id": node_id,
         "dim": int(len(vec)),
@@ -1007,12 +1144,16 @@ async def get_embedding(node_id: str) -> dict[str, Any]:
 
 @app.get("/health")
 async def health() -> dict[str, Any]:
+    state = _state()
     return {
         "status": "ok",
-        "connected_databases": list(_twins.keys()),
-        "active_db": _active_db,
-        "embeddings_loaded": bool(_emb_data.get("loaded")),
-        "catalog_loaded": bool(_catalogs),
+        "mode": state.config.mode,
+        "connect_enabled": state.config.allow_connect,
+        "require_explicit_db": state.config.require_explicit_db,
+        "connected_databases": list(state.twins.keys()),
+        "active_db": state.active_db,
+        "embeddings_loaded": bool(state.emb_data.get("loaded")),
+        "catalog_loaded": bool(state.catalogs),
     }
 
 
@@ -1030,6 +1171,13 @@ def main() -> None:
     parser.add_argument("--db", type=str, help="Auto-connect to this DuckDB path on startup")
     parser.add_argument("--host", type=str, default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--mode", choices=("local", "server"), default=_state().config.mode)
+    parser.add_argument(
+        "--allow-db-root",
+        action="append",
+        default=[],
+        help="Restrict database paths to these roots (repeatable).",
+    )
     parser.add_argument("--no-profile", action="store_true", help="Skip column profiling")
     parser.add_argument("--no-fks", action="store_true", help="Skip FK discovery (use catalog instead)")
     parser.add_argument(
@@ -1057,11 +1205,17 @@ def main() -> None:
     _default_catalog_path = args.catalog
     _default_graph_path = args.graph
     _default_weights_path = args.weights
+    configure_runtime(
+        mode=args.mode,
+        allowed_db_roots=args.allow_db_root or None,
+        reset_state=False,
+    )
 
     if args.db:
+        resolved_db_path = _validate_db_path_access(args.db)
         use_catalog = os.path.exists(args.catalog)
-        print(f"Building digital twin for {args.db} (catalog={'yes' if use_catalog else 'no'})...")
-        twin = DigitalTwin(args.db)
+        print(f"Building digital twin for {resolved_db_path} (catalog={'yes' if use_catalog else 'no'})...")
+        twin = DigitalTwin(resolved_db_path)
         snap = twin.build(
             profile_columns=not args.no_profile,
             discover_fks=(not args.no_fks and not use_catalog),
@@ -1083,10 +1237,11 @@ def main() -> None:
             except Exception as exc:
                 print(f"WARNING: Catalog overlay failed: {exc}")
 
-        _twins[args.db] = twin
-        _snapshots[args.db] = serialized
-        global _active_db
-        _active_db = args.db
+        state = _state()
+        state.twins[resolved_db_path] = twin
+        state.snapshots[resolved_db_path] = serialized
+        if not state.config.require_explicit_db:
+            state.active_db = resolved_db_path
         print(
             f"Twin ready: {snap.total_tables} tables, {snap.total_rows:,} rows "
             f"(built in {snap.build_duration_s}s)"

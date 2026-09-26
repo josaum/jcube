@@ -18,7 +18,7 @@ Example::
         # ... new events land in event_sequences ...
         handle.stop()
 
-Requires DuckDB.  Install with: pip install event-jepa-cube[duckdb]
+Requires DuckDB.  Install with: pip install event-jepa-cube[twin]
 """
 
 from __future__ import annotations

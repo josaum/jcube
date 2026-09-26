@@ -10,8 +10,8 @@ The Mycelia API provides:
 - Array-of-Structs storage for multi-vector entities
 - Pre-trained and fine-tuned encoders (SIGReg)
 
-Zero required dependencies (uses ``urllib`` from stdlib).  Optional
-``pyarrow`` enables Arrow IPC bulk transfer to DuckDB.
+Zero required dependencies for REST-only management/search paths (uses ``urllib``
+from stdlib). ``pyarrow`` is required for Flight-first vector data operations.
 
 Example::
 
@@ -25,30 +25,133 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import urllib.error
 import urllib.request
-from typing import Any
+from types import TracebackType
+from typing import Any, Callable, cast
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
 try:
     import pyarrow as pa
+    import pyarrow.flight as flight
 
     _ARROW_AVAILABLE = True
 except ImportError:
     _ARROW_AVAILABLE = False
+    flight = None  # type: ignore[assignment]
 
 
 def _require_arrow() -> None:
     if not _ARROW_AVAILABLE:
-        raise ImportError("pyarrow is required for Arrow data transfer. Install with: pip install pyarrow>=14.0")
+        raise ImportError("pyarrow is required for Arrow data transfer. Install with: pip install pyarrow>=23.0.1")
+
+
+def _derive_flight_url(base_url: str) -> str:
+    parsed = urlparse(base_url)
+    host = parsed.hostname or "localhost"
+    port = os.getenv("MYCELIA_FLIGHT_PORT", "8815")
+    return f"grpc://{host}:{port}"
+
+
+def _resolve_flight_auth_header(api_key: str | None) -> str | None:
+    explicit = os.getenv("MYCELIA_FLIGHT_AUTHORIZATION", "").strip()
+    if explicit:
+        return explicit
+
+    bearer = os.getenv("MYCELIA_FLIGHT_BEARER_TOKEN", "").strip()
+    if bearer:
+        return bearer if bearer.lower().startswith("bearer ") else f"Bearer {bearer}"
+
+    if api_key:
+        return api_key if api_key.lower().startswith("bearer ") else f"Bearer {api_key}"
+
+    legacy_secret = os.getenv("MYCELIA_FLIGHT_SECRET", "").strip()
+    if legacy_secret:
+        return f"Bearer {legacy_secret}"
+    return None
+
+
+def _local_flight_call_options(
+    timeout: float | None,
+    api_key: str | None,
+    namespace: str | None,
+    write_options: Any,
+) -> Any:
+    headers: list[tuple[bytes, bytes]] = []
+    authorization = _resolve_flight_auth_header(api_key)
+    if authorization:
+        headers.append((b"authorization", authorization.encode()))
+    if namespace:
+        headers.append((b"x-mycelia-namespace", namespace.encode()))
+    return flight.FlightCallOptions(timeout=timeout, headers=headers or None, write_options=write_options)
+
+
+def _coerce_arrow_scalar(column: Any, index: int) -> Any:
+    value = column[index].as_py()
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        try:
+            return value.decode("utf-8")
+        except UnicodeDecodeError:
+            return value
+    return value
+
+
+def _infer_arrow_array(values: list[Any]) -> Any:
+    if all(value is None or isinstance(value, bool) for value in values):
+        return pa.array(values, type=pa.bool_())
+    if all(value is None or isinstance(value, int) for value in values):
+        return pa.array(values, type=pa.int64())
+    if all(value is None or isinstance(value, (int, float)) for value in values):
+        return pa.array(values, type=pa.float64())
+    return pa.array(values, type=pa.string())
+
+
+def _dedupe_strings(values: list[str] | None) -> list[str]:
+    if not values:
+        return []
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for value in values:
+        text = str(value).strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        ordered.append(text)
+    return ordered
+
+
+def _escape_filter_value(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _expect_dict(value: Any, context: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise MyceliaError(f"{context} returned {type(value).__name__}, expected dict")
+    return cast(dict[str, Any], value)
+
+
+def _expect_list(value: Any, context: str) -> list[dict[str, Any]]:
+    if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
+        raise MyceliaError(f"{context} returned {type(value).__name__}, expected list[dict]")
+    return cast(list[dict[str, Any]], value)
+
+
+def _expect_vector_list(value: Any, context: str) -> list[list[float]]:
+    if not isinstance(value, list):
+        raise MyceliaError(f"{context} returned {type(value).__name__}, expected list")
+    return cast(list[list[float]], value)
 
 
 class MyceliaStore:
     """Client for the Mycelia API (Milvus-backed vector store).
 
-    Stores and retrieves embedding vectors via REST, with optional Arrow IPC
-    bulk transfer for integration with DuckDB.
+    Stores and retrieves embedding vectors with Flight-first bulk transport and
+    Arrow IPC integration for DuckDB.
 
     Args:
         base_url: Mycelia API base URL (e.g. ``"https://api.getjai.com"``).
@@ -63,11 +166,36 @@ class MyceliaStore:
         api_key: str | None = None,
         namespace: str | None = None,
         timeout: int = 30,
+        *,
+        flight_url: str | None = None,
+        vector_ingest_transport: str | None = None,
+        vector_ingest_batch_size: int | None = None,
+        compression_config: Any | None = None,
+        observation_hook: Callable[[Any], None] | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._api_key = api_key
         self._namespace = namespace
         self._timeout = timeout
+        self._flight_url = flight_url or os.getenv("MYCELIA_FLIGHT_URL") or _derive_flight_url(self._base_url)
+        transport = (vector_ingest_transport or os.getenv("MYCELIA_VECTOR_INGEST_TRANSPORT") or "").strip().lower()
+        if not transport:
+            transport = "flight"
+        if transport not in {"flight", "http"}:
+            raise ValueError(f"unsupported vector_ingest_transport: {transport}")
+        self._vector_ingest_transport = transport
+        self._observation_hook = observation_hook
+        self._flight_compression = None
+        if transport == "flight":
+            _require_arrow()
+            from event_jepa_cube.flight_compression import FlightCompressionConfig
+
+            self._flight_compression = compression_config or FlightCompressionConfig.from_env()
+        self._vector_ingest_batch_size = max(
+            1,
+            int(vector_ingest_batch_size or os.getenv("MYCELIA_VECTOR_INGEST_BATCH_SIZE") or 4096),
+        )
+        self._flight_client: Any | None = None
 
     # ------------------------------------------------------------------
     # HTTP helpers
@@ -113,17 +241,262 @@ class MyceliaStore:
     def _delete(self, path: str, body: dict[str, Any] | None = None) -> Any:
         return self._request("DELETE", path, body)
 
+    def _flight_options(self) -> Any:
+        _require_arrow()
+        if self._flight_compression is None:
+            raise MyceliaError("Flight transport is not configured")
+        return _local_flight_call_options(
+            float(self._timeout),
+            self._api_key,
+            self._namespace,
+            self._flight_compression.options_for("jcube.client.dynamic"),
+        )
+
+    def _get_flight_client(self) -> Any:
+        _require_arrow()
+        if self._flight_client is None:
+            try:
+                self._flight_client = flight.connect(self._flight_url)
+            except Exception as exc:  # pragma: no cover - depends on runtime connectivity
+                raise MyceliaError(f"Failed to connect to Flight endpoint {self._flight_url}: {exc}") from exc
+        return self._flight_client
+
+    def close(self) -> None:
+        if self._flight_client is not None:
+            self._flight_client.close()
+            self._flight_client = None
+
+    def __enter__(self) -> MyceliaStore:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
+        self.close()
+
+    def _collection_schema(self, name: str) -> dict[str, Any]:
+        return _expect_dict(self._get(f"/v2/collections/{name}/schema"), "_collection_schema")
+
+    def _build_vector_rows(
+        self,
+        vectors: dict[str, list[float]],
+        *,
+        filter_tag: str | None = None,
+        tenant_id: str | None = None,
+        repo: str | None = None,
+        rev: str | None = None,
+        metadata_by_id: dict[str, dict[str, Any]] | None = None,
+        relations_by_id: dict[str, list[str]] | None = None,
+        text_by_id: dict[str, str] | None = None,
+        scalar_fields_by_id: dict[str, dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        metadata_by_id = metadata_by_id or {}
+        relations_by_id = relations_by_id or {}
+        text_by_id = text_by_id or {}
+        scalar_fields_by_id = scalar_fields_by_id or {}
+
+        payload: list[dict[str, Any]] = []
+        for vid, emb in vectors.items():
+            row: dict[str, Any] = {"id": vid, "embedding": emb}
+            if filter_tag:
+                row["filter_tag"] = filter_tag
+            if tenant_id:
+                row["tenant_id"] = tenant_id
+            if repo:
+                row["repo"] = repo
+            if rev:
+                row["rev"] = rev
+
+            metadata = metadata_by_id.get(vid)
+            if metadata:
+                row["metadata"] = metadata
+
+            relations = _dedupe_strings(relations_by_id.get(vid))
+            if relations:
+                row["relations"] = relations
+
+            text_snippet = text_by_id.get(vid)
+            if text_snippet:
+                row["text_snippet"] = text_snippet
+
+            scalar_fields = scalar_fields_by_id.get(vid)
+            if scalar_fields:
+                for key, value in scalar_fields.items():
+                    if (
+                        value is None
+                        or key in row
+                        or key
+                        in {
+                            "id",
+                            "embedding",
+                            "metadata",
+                            "relations",
+                            "text_snippet",
+                        }
+                    ):
+                        continue
+                    row[key] = value
+
+            payload.append(row)
+        return payload
+
+    def _store_vectors_http(self, collection: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
+        return _expect_dict(
+            self._post(f"/v2/collections/{collection}/vectors", {"vectors": rows}),
+            "_store_vectors_http",
+        )
+
+    def _vector_schema_from_rows(self, rows: list[dict[str, Any]]) -> tuple[Any, list[str]]:
+        _require_arrow()
+        optional_names = sorted({key for row in rows for key in row if key not in {"id", "embedding"}})
+        fields = [
+            pa.field("id", pa.string()),
+            pa.field("embedding", pa.list_(pa.float32())),
+        ]
+        for name in optional_names:
+            values = [row.get(name) for row in rows]
+            if name == "relations":
+                dtype = pa.list_(pa.string())
+            elif name in {"filter_tag", "tenant_id", "repo", "rev", "text_snippet"}:
+                dtype = pa.string()
+            elif name == "metadata":
+                dtype = pa.array(values).type
+            else:
+                dtype = _infer_arrow_array(values).type
+            fields.append(pa.field(name, dtype))
+        return pa.schema(fields), optional_names
+
+    def _table_from_vector_rows(
+        self,
+        rows: list[dict[str, Any]],
+        *,
+        schema: Any | None = None,
+        optional_names: list[str] | None = None,
+    ) -> Any:
+        _require_arrow()
+        if schema is None or optional_names is None:
+            schema, optional_names = self._vector_schema_from_rows(rows)
+
+        ids = [str(row["id"]) for row in rows]
+        embeddings = [list(row["embedding"]) for row in rows]
+
+        columns: dict[str, Any] = {
+            "id": pa.array(ids, type=schema.field("id").type),
+            "embedding": pa.array(embeddings, type=schema.field("embedding").type),
+        }
+
+        for name in optional_names:
+            values = [row.get(name) for row in rows]
+            columns[name] = pa.array(values, type=schema.field(name).type)
+
+        return pa.table(columns, schema=schema)
+
+    def _store_vectors_flight(self, collection: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
+        _require_arrow()
+        from event_jepa_cube.flight_compression import (
+            FlightIpcDirection,
+            FlightRpcAction,
+            collect_flight_table,
+            logical_nbytes,
+            observe_flight_operation,
+        )
+
+        if self._flight_compression is None:
+            raise MyceliaError("Flight transport is not configured")
+        route = "jcube.client.dynamic"
+        client = self._get_flight_client()
+        descriptor = flight.FlightDescriptor.for_command(f"vectors:{collection}".encode())
+        schema, optional_names = self._vector_schema_from_rows(rows)
+        with observe_flight_operation(
+            route=route,
+            codec=self._flight_compression.codec_for(route),
+            direction=FlightIpcDirection.WRITE,
+            action=FlightRpcAction.DO_EXCHANGE,
+            hook=self._observation_hook,
+        ) as write_observation:
+            writer, reader = client.do_exchange(descriptor, options=self._flight_options())
+            writer.begin(schema, options=self._flight_compression.options_for(route))
+            for start in range(0, len(rows), self._vector_ingest_batch_size):
+                batch_rows = rows[start : start + self._vector_ingest_batch_size]
+                table = self._table_from_vector_rows(
+                    batch_rows,
+                    schema=schema,
+                    optional_names=optional_names,
+                )
+                write_observation.add_logical_bytes(logical_nbytes(table))
+                writer.write_table(table)
+            writer.done_writing()
+        try:
+            with observe_flight_operation(
+                route=route,
+                codec=self._flight_compression.codec_for(route),
+                direction=FlightIpcDirection.READ,
+                action=FlightRpcAction.DO_EXCHANGE,
+                hook=self._observation_hook,
+            ) as read_observation:
+                ack = collect_flight_table(reader)
+                read_observation.add_logical_bytes(logical_nbytes(ack))
+        finally:
+            writer.close()
+        if ack.num_rows == 0:
+            return {"collection": collection, "inserted": 0, "dimension": 0}
+        return {
+            "collection": _coerce_arrow_scalar(ack.column("collection"), 0) or collection,
+            "inserted": int(_coerce_arrow_scalar(ack.column("inserted"), 0) or 0),
+            "dimension": int(_coerce_arrow_scalar(ack.column("dimension"), 0) or 0),
+        }
+
     def _head(self, path: str) -> bool:
         """HEAD request, returns True if 2xx."""
         url = f"{self._base_url}{path}"
         req = urllib.request.Request(url, headers=self._headers(), method="HEAD")
         try:
             with urllib.request.urlopen(req, timeout=self._timeout) as resp:
-                return 200 <= resp.status < 300
+                return bool(200 <= resp.status < 300)
         except urllib.error.HTTPError:
             return False
         except urllib.error.URLError:
             return False
+
+    @staticmethod
+    def build_filter_expr(
+        filter_expr: str | None = None,
+        *,
+        tenant_id: str | None = None,
+        repo: str | None = None,
+        rev: str | None = None,
+        filter_tag: str | None = None,
+        source_db: str | None = None,
+        entity_type: str | None = None,
+    ) -> str | None:
+        """Build a canonical Mycelia/LEIO filter expression.
+
+        The returned expression targets top-level scalar fields that match the
+        LEIO/Milvus operational scope: ``tenant_id``, ``repo``, ``rev``, and
+        ``filter_tag``.
+        """
+
+        clauses: list[str] = []
+        if filter_expr:
+            clauses.append(f"({filter_expr})")
+
+        for key, value in (
+            ("tenant_id", tenant_id),
+            ("repo", repo),
+            ("rev", rev),
+            ("filter_tag", filter_tag),
+            ("source_db", source_db),
+            ("entity_type", entity_type),
+        ):
+            if value:
+                clauses.append(f'{key} == "{_escape_filter_value(value)}"')
+
+        if not clauses:
+            return None
+        return " and ".join(clauses)
 
     # ------------------------------------------------------------------
     # Collection management
@@ -160,7 +533,7 @@ class MyceliaStore:
             body["model"] = model if isinstance(model, dict) else {"name": model, "dimension": dimension}
         result = self._post("/v2/collections", body)
         logger.info("Created Mycelia collection %r (dim=%d)", name, dimension)
-        return result
+        return _expect_dict(result, "ensure_collection")
 
     def collection_exists(self, name: str) -> bool:
         """Check if a collection exists."""
@@ -168,11 +541,11 @@ class MyceliaStore:
 
     def get_collection(self, name: str) -> dict[str, Any]:
         """Get collection details."""
-        return self._get(f"/v2/collections/{name}")
+        return _expect_dict(self._get(f"/v2/collections/{name}"), "get_collection")
 
     def list_collections(self) -> list[dict[str, Any]]:
         """List all collections."""
-        return self._get("/v2/collections")
+        return _expect_list(self._get("/v2/collections"), "list_collections")
 
     def delete_collection(self, name: str) -> None:
         """Delete a collection and all its data."""
@@ -188,6 +561,14 @@ class MyceliaStore:
         collection: str,
         vectors: dict[str, list[float]],
         filter_tag: str | None = None,
+        *,
+        tenant_id: str | None = None,
+        repo: str | None = None,
+        rev: str | None = None,
+        metadata_by_id: dict[str, dict[str, Any]] | None = None,
+        relations_by_id: dict[str, list[str]] | None = None,
+        text_by_id: dict[str, str] | None = None,
+        scalar_fields_by_id: dict[str, dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """Insert pre-computed vectors into a collection.
 
@@ -195,31 +576,70 @@ class MyceliaStore:
             collection: Collection name.
             vectors: Mapping of ID to embedding vector.
             filter_tag: Optional tag for filtering.
+            tenant_id: Optional top-level tenant scope field.
+            repo: Optional top-level repository scope field.
+            rev: Optional top-level revision scope field.
+            metadata_by_id: Optional per-vector metadata payloads.
+            relations_by_id: Optional per-vector relation/tag arrays.
+            text_by_id: Optional per-vector text snippet payload.
 
         Returns:
             Ingestion result.
         """
-        payload = [
-            {"id": vid, "embedding": emb, **({"filter_tag": filter_tag} if filter_tag else {})}
-            for vid, emb in vectors.items()
-        ]
-        return self._post(f"/v2/collections/{collection}/vectors", {"vectors": payload})
+        rows = self._build_vector_rows(
+            vectors,
+            filter_tag=filter_tag,
+            tenant_id=tenant_id,
+            repo=repo,
+            rev=rev,
+            metadata_by_id=metadata_by_id,
+            relations_by_id=relations_by_id,
+            text_by_id=text_by_id,
+            scalar_fields_by_id=scalar_fields_by_id,
+        )
+        if self._vector_ingest_transport == "flight":
+            return self._store_vectors_flight(collection, rows)
+        return self._store_vectors_http(collection, rows)
 
     def store_representations(
         self,
         collection: str,
         representations: dict[str, list[float]],
+        *,
+        tenant_id: str | None = None,
+        repo: str | None = None,
+        rev: str | None = None,
+        metadata_by_id: dict[str, dict[str, Any]] | None = None,
+        relations_by_id: dict[str, list[str]] | None = None,
+        text_by_id: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Store pipeline representations as vectors.
 
         Convenience wrapper that tags vectors with ``filter_tag="representation"``.
         """
-        return self.store_vectors(collection, representations, filter_tag="representation")
+        return self.store_vectors(
+            collection,
+            representations,
+            filter_tag="representation",
+            tenant_id=tenant_id,
+            repo=repo,
+            rev=rev,
+            metadata_by_id=metadata_by_id,
+            relations_by_id=relations_by_id,
+            text_by_id=text_by_id,
+        )
 
     def store_predictions(
         self,
         collection: str,
         predictions: dict[str, list[list[float]]],
+        *,
+        tenant_id: str | None = None,
+        repo: str | None = None,
+        rev: str | None = None,
+        metadata_by_id: dict[str, dict[str, Any]] | None = None,
+        relations_by_id: dict[str, list[str]] | None = None,
+        text_by_id: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Store pipeline predictions as vectors.
 
@@ -229,7 +649,44 @@ class MyceliaStore:
         for sid, steps in predictions.items():
             for step_num, pred in enumerate(steps, start=1):
                 flat[f"{sid}_step_{step_num}"] = pred
-        return self.store_vectors(collection, flat, filter_tag="prediction")
+        return self.store_vectors(
+            collection,
+            flat,
+            filter_tag="prediction",
+            tenant_id=tenant_id,
+            repo=repo,
+            rev=rev,
+            metadata_by_id=metadata_by_id,
+            relations_by_id=relations_by_id,
+            text_by_id=text_by_id,
+        )
+
+    def store_code_symbols(
+        self,
+        collection: str,
+        vectors: dict[str, list[float]],
+        *,
+        tenant_id: str | None = None,
+        repo: str | None = None,
+        rev: str | None = None,
+        metadata_by_id: dict[str, dict[str, Any]] | None = None,
+        relations_by_id: dict[str, list[str]] | None = None,
+        text_by_id: dict[str, str] | None = None,
+        scalar_fields_by_id: dict[str, dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Store LEIO-derived code symbol vectors."""
+        return self.store_vectors(
+            collection,
+            vectors,
+            filter_tag="code_symbol",
+            tenant_id=tenant_id,
+            repo=repo,
+            rev=rev,
+            metadata_by_id=metadata_by_id,
+            relations_by_id=relations_by_id,
+            text_by_id=text_by_id,
+            scalar_fields_by_id=scalar_fields_by_id,
+        )
 
     def get_vectors(
         self,
@@ -249,7 +706,7 @@ class MyceliaStore:
         if ids:
             id_param = ",".join(ids)
             path += f"?ids={id_param}"
-        return self._get(path)
+        return _expect_list(self._get(path), "get_vectors")
 
     def delete_vectors(self, collection: str, ids: list[str]) -> None:
         """Delete vectors by ID."""
@@ -267,6 +724,13 @@ class MyceliaStore:
         ids: list[str] | None = None,
         limit: int = 10,
         filter_expr: str | None = None,
+        *,
+        tenant_id: str | None = None,
+        repo: str | None = None,
+        rev: str | None = None,
+        filter_tag: str | None = None,
+        source_db: str | None = None,
+        entity_type: str | None = None,
     ) -> list[dict[str, Any]]:
         """Nearest-neighbor search in a collection.
 
@@ -278,7 +742,11 @@ class MyceliaStore:
             vectors: Multiple query vectors.
             ids: Search by existing vector IDs.
             limit: Top-k results.
-            filter_expr: Optional metadata filter.
+            filter_expr: Optional raw filter expression.
+            tenant_id: Optional tenant scope filter.
+            repo: Optional repository scope filter.
+            rev: Optional revision scope filter.
+            filter_tag: Optional filter tag scope.
 
         Returns:
             List of result dicts with ``id``, ``distance``, ``score``.
@@ -290,11 +758,20 @@ class MyceliaStore:
             body["vectors"] = vectors
         elif ids is not None:
             body["ids"] = ids
-        if filter_expr:
-            body["filter"] = filter_expr
+        merged_filter = self.build_filter_expr(
+            filter_expr,
+            tenant_id=tenant_id,
+            repo=repo,
+            rev=rev,
+            filter_tag=filter_tag,
+            source_db=source_db,
+            entity_type=entity_type,
+        )
+        if merged_filter:
+            body["filter"] = merged_filter
 
         result = self._post(f"/v2/search/{collection}", body)
-        return result.get("results", result) if isinstance(result, dict) else result
+        return _expect_list(result.get("results", result) if isinstance(result, dict) else result, "search_similar")
 
     def search_hybrid(
         self,
@@ -303,6 +780,14 @@ class MyceliaStore:
         vectors: list[list[float]] | None = None,
         alpha: float = 0.7,
         limit: int = 10,
+        filter_expr: str | None = None,
+        *,
+        tenant_id: str | None = None,
+        repo: str | None = None,
+        rev: str | None = None,
+        filter_tag: str | None = None,
+        source_db: str | None = None,
+        entity_type: str | None = None,
     ) -> list[dict[str, Any]]:
         """Dense + sparse hybrid search with WeightedRanker fusion.
 
@@ -312,20 +797,44 @@ class MyceliaStore:
             vectors: Pre-computed dense vectors.
             alpha: Dense/sparse blend (0.0=sparse, 1.0=dense).
             limit: Top-k results.
+            filter_expr: Optional raw filter expression.
+            tenant_id: Optional tenant scope filter.
+            repo: Optional repository scope filter.
+            rev: Optional revision scope filter.
+            filter_tag: Optional filter tag scope.
         """
         body: dict[str, Any] = {"alpha": alpha, "limit": limit}
         if query_text:
             body["query_text"] = query_text
         if vectors:
             body["vectors"] = vectors
+        merged_filter = self.build_filter_expr(
+            filter_expr,
+            tenant_id=tenant_id,
+            repo=repo,
+            rev=rev,
+            filter_tag=filter_tag,
+            source_db=source_db,
+            entity_type=entity_type,
+        )
+        if merged_filter:
+            body["filter"] = merged_filter
         result = self._post(f"/v2/search/{collection}/hybrid", body)
-        return result.get("results", result) if isinstance(result, dict) else result
+        return _expect_list(result.get("results", result) if isinstance(result, dict) else result, "search_hybrid")
 
     def search_rag(
         self,
         collection: str,
         query_text: str,
         limit: int = 10,
+        filter_expr: str | None = None,
+        *,
+        tenant_id: str | None = None,
+        repo: str | None = None,
+        rev: str | None = None,
+        filter_tag: str | None = None,
+        source_db: str | None = None,
+        entity_type: str | None = None,
     ) -> list[dict[str, Any]]:
         """RAG-optimized retrieval with optional cross-encoder reranking.
 
@@ -337,8 +846,20 @@ class MyceliaStore:
         Returns:
             List of chunk dicts with ``text``, ``metadata``, ``score``.
         """
-        result = self._post(f"/v2/search/{collection}/rag", {"query_text": query_text, "limit": limit})
-        return result.get("chunks", result) if isinstance(result, dict) else result
+        body: dict[str, Any] = {"query_text": query_text, "limit": limit}
+        merged_filter = self.build_filter_expr(
+            filter_expr,
+            tenant_id=tenant_id,
+            repo=repo,
+            rev=rev,
+            filter_tag=filter_tag,
+            source_db=source_db,
+            entity_type=entity_type,
+        )
+        if merged_filter:
+            body["filter"] = merged_filter
+        result = self._post(f"/v2/search/{collection}/rag", body)
+        return _expect_list(result.get("chunks", result) if isinstance(result, dict) else result, "search_rag")
 
     # ------------------------------------------------------------------
     # Embedding generation
@@ -371,7 +892,7 @@ class MyceliaStore:
             body["modality"] = modality
 
         result = self._post("/v2/embed", body)
-        return result.get("embeddings", result) if isinstance(result, dict) else result
+        return _expect_vector_list(result.get("embeddings", result) if isinstance(result, dict) else result, "embed")
 
     # ------------------------------------------------------------------
     # Arrow IPC bulk transfer
@@ -413,6 +934,10 @@ class MyceliaStore:
         id_column: str = "id",
         embedding_column: str = "embedding",
         filter_tag: str | None = None,
+        *,
+        tenant_id: str | None = None,
+        repo: str | None = None,
+        rev: str | None = None,
     ) -> dict[str, Any]:
         """Insert vectors from a PyArrow Table into Mycelia.
 
@@ -430,7 +955,14 @@ class MyceliaStore:
         ids = table.column(id_column).to_pylist()
         embeddings = table.column(embedding_column).to_pylist()
         vectors = dict(zip(ids, embeddings))
-        return self.store_vectors(collection, vectors, filter_tag=filter_tag)
+        return self.store_vectors(
+            collection,
+            vectors,
+            filter_tag=filter_tag,
+            tenant_id=tenant_id,
+            repo=repo,
+            rev=rev,
+        )
 
     def register_in_duckdb(
         self,
@@ -482,6 +1014,10 @@ class MyceliaStore:
         representations_collection: str | None = None,
         predictions_collection: str | None = None,
         dimension: int | None = None,
+        *,
+        tenant_id: str | None = None,
+        repo: str | None = None,
+        rev: str | None = None,
     ) -> dict[str, Any]:
         """Sync a jcube pipeline result to Mycelia collections.
 
@@ -502,17 +1038,47 @@ class MyceliaStore:
         preds = pipeline_result.get("predictions", {})
         stored: dict[str, Any] = {}
 
+        scope = pipeline_result.get("scope", {}) if isinstance(pipeline_result.get("scope"), dict) else {}
+        effective_tenant_id = tenant_id or scope.get("tenant_id")
+        effective_repo = repo or scope.get("repo")
+        effective_rev = rev or scope.get("rev")
+
+        rep_metadata = pipeline_result.get("representation_metadata")
+        rep_relations = pipeline_result.get("representation_relations")
+        rep_text = pipeline_result.get("representation_text")
+        pred_metadata = pipeline_result.get("prediction_metadata")
+        pred_relations = pipeline_result.get("prediction_relations")
+        pred_text = pipeline_result.get("prediction_text")
+
         if reps and representations_collection:
             dim = dimension or len(next(iter(reps.values())))
             self.ensure_collection(representations_collection, dimension=dim)
-            self.store_representations(representations_collection, reps)
+            self.store_representations(
+                representations_collection,
+                reps,
+                tenant_id=effective_tenant_id,
+                repo=effective_repo,
+                rev=effective_rev,
+                metadata_by_id=rep_metadata if isinstance(rep_metadata, dict) else None,
+                relations_by_id=rep_relations if isinstance(rep_relations, dict) else None,
+                text_by_id=rep_text if isinstance(rep_text, dict) else None,
+            )
             stored["representations_stored"] = len(reps)
 
         if preds and predictions_collection:
             first_pred = next(iter(preds.values()))[0]
             dim = dimension or len(first_pred)
             self.ensure_collection(predictions_collection, dimension=dim)
-            self.store_predictions(predictions_collection, preds)
+            self.store_predictions(
+                predictions_collection,
+                preds,
+                tenant_id=effective_tenant_id,
+                repo=effective_repo,
+                rev=effective_rev,
+                metadata_by_id=pred_metadata if isinstance(pred_metadata, dict) else None,
+                relations_by_id=pred_relations if isinstance(pred_relations, dict) else None,
+                text_by_id=pred_text if isinstance(pred_text, dict) else None,
+            )
             stored["predictions_stored"] = sum(len(s) for s in preds.values())
 
         return stored

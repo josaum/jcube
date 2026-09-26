@@ -204,7 +204,8 @@ class ColumnEncoder:
     def _hash_float(self, text: str) -> float:
         """Hash any string to a float in [-1, 1]."""
         h = hashlib.md5(text.encode(), usedforsecurity=False).digest()[:4]
-        return (struct.unpack("<I", h)[0] / (2**32)) * 2 - 1
+        value = struct.unpack("<I", h)[0]
+        return (float(value) / (2**32)) * 2 - 1
 
     def encode_row(
         self,
@@ -380,7 +381,7 @@ class Materializer:
             "FROM information_schema.columns "
             "WHERE table_schema = 'main' "
             "ORDER BY table_name, ordinal_position"
-        ).fetch_arrow_table()
+        ).to_arrow_table()
 
         table_cols: dict[str, list[tuple[str, str]]] = {}
         for i in range(len(arrow)):
@@ -535,7 +536,6 @@ class Materializer:
         # EventJEPA fast. Tables with more columns hash-project down.
         raw_max = max(tt.embedding_dim for tt in tables)
         max_emb_dim = min(raw_max, self._encoder.embedding_dim)
-        entity_col_name = tables[0].entity_column
 
         # ---- Phase 1: Discover target entity IDs ---------------------------
         if entity_ids is not None:
@@ -599,7 +599,7 @@ class Materializer:
             try:
                 arrow_table = con.execute(
                     f"SELECT * FROM {safe_tbl} {where} ORDER BY {safe_ts}"
-                ).fetch_arrow_table()
+                ).to_arrow_table()
             except Exception:
                 continue
 
@@ -786,3 +786,96 @@ def result_to_dict(result: MaterializationResult) -> dict[str, Any]:
         "duration_s": result.duration_s,
         "timelines": timelines_summary,
     }
+
+
+def result_to_mycelia_payloads(
+    result: MaterializationResult,
+    *,
+    tenant_id: str | None = None,
+    repo: str | None = None,
+    rev: str | None = None,
+) -> dict[str, Any]:
+    """Convert a processed materialization result into MyceliaStore-ready payloads.
+
+    The returned dict matches the richer input contract understood by
+    ``MyceliaStore.sync_pipeline_results()``:
+
+    - ``scope``
+    - ``representations``
+    - ``representation_metadata``
+    - ``representation_relations``
+    - ``representation_text``
+    - ``predictions``
+    - ``prediction_metadata``
+    - ``prediction_relations``
+    - ``prediction_text``
+    """
+
+    scope = {key: value for key, value in {"tenant_id": tenant_id, "repo": repo, "rev": rev}.items() if value}
+    payload: dict[str, Any] = {
+        "scope": scope,
+        "representations": dict(result.representations),
+        "predictions": dict(result.predictions),
+        "representation_metadata": {},
+        "representation_relations": {},
+        "representation_text": {},
+        "prediction_metadata": {},
+        "prediction_relations": {},
+        "prediction_text": {},
+    }
+
+    for entity_id, timeline in result.timelines.items():
+        base_relations = [
+            "kind:timeline",
+            "kind:representation",
+            f"entity:{entity_id}",
+            f"entity_type:{timeline.entity_type.lower()}",
+            f"modality:{timeline.sequence.modality}",
+            *[f"table:{table}" for table in timeline.source_tables],
+        ]
+
+        if entity_id in result.representations:
+            rep = result.representations[entity_id]
+            payload["representation_metadata"][entity_id] = {
+                "entity_id": entity_id,
+                "entity_type": timeline.entity_type,
+                "event_count": timeline.event_count,
+                "time_span_days": round(timeline.time_span_days, 4),
+                "source_tables": timeline.source_tables,
+                "modality": timeline.sequence.modality,
+                "embedding_dim": len(rep),
+                "tables_scanned": result.tables_scanned,
+                "salient_dimensions": result.patterns.get(entity_id, []),
+            }
+            payload["representation_relations"][entity_id] = base_relations
+            payload["representation_text"][entity_id] = (
+                f"representation entity={entity_id} type={timeline.entity_type} "
+                f"events={timeline.event_count} tables={','.join(timeline.source_tables)}"
+            )
+
+        if entity_id in result.predictions:
+            for step_num, pred in enumerate(result.predictions[entity_id], start=1):
+                pred_id = f"{entity_id}_step_{step_num}"
+                payload["prediction_metadata"][pred_id] = {
+                    "entity_id": entity_id,
+                    "entity_type": timeline.entity_type,
+                    "sequence_id": entity_id,
+                    "step": step_num,
+                    "prediction_dim": len(pred),
+                    "source_tables": timeline.source_tables,
+                    "modality": timeline.sequence.modality,
+                }
+                payload["prediction_relations"][pred_id] = [
+                    "kind:prediction",
+                    f"entity:{entity_id}",
+                    f"entity_type:{timeline.entity_type.lower()}",
+                    f"step:{step_num}",
+                    f"modality:{timeline.sequence.modality}",
+                    *[f"table:{table}" for table in timeline.source_tables],
+                ]
+                payload["prediction_text"][pred_id] = (
+                    f"prediction entity={entity_id} type={timeline.entity_type} "
+                    f"step={step_num} tables={','.join(timeline.source_tables)}"
+                )
+
+    return payload

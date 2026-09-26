@@ -49,6 +49,8 @@ def _mock_flight_info(table: pa.Table) -> MagicMock:
 def _mock_reader(table: pa.Table) -> MagicMock:
     """Create a mock FlightStreamReader that returns a table."""
     reader = MagicMock()
+    reader.schema = table.schema
+    reader.__iter__.return_value = iter([MagicMock(data=batch) for batch in table.to_batches()])
     reader.read_all.return_value = table
     return reader
 

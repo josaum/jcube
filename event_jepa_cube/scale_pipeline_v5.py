@@ -241,7 +241,7 @@ VOLUMES = {
 # CPU image for DuckDB materialization (no GPU needed)
 cpu_image = (
     modal.Image.debian_slim(python_version="3.12")
-    .pip_install("duckdb>=1.2.0", "pyarrow>=18.0")
+    .pip_install("duckdb>=1.5.2", "pyarrow>=23.0.1")
 )
 
 # V5 GPU image — BGE-M3 via sentence-transformers, no peft/cugraph
@@ -254,7 +254,7 @@ gpu_image_v5 = (
     .pip_install(
         "torch>=2.6",
         "numpy>=2.0",
-        "pyarrow>=18.0",
+        "pyarrow>=23.0.1",
         "transformers>=4.50",
         "sentence-transformers>=3.0",
         "accelerate>=0.35",

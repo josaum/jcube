@@ -4,7 +4,7 @@ Watches DuckDB tables for new records, runs the EventJEPA pipeline
 incrementally on affected sequences, pre-fills prediction tables,
 evaluates alert rules, and fires registered action callbacks.
 
-Requires DuckDB. Install with: pip install event-jepa-cube[duckdb]
+Requires DuckDB. Install with: pip install event-jepa-cube[twin]
 """
 
 from __future__ import annotations

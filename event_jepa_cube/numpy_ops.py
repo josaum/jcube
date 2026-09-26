@@ -13,7 +13,6 @@ import mmap
 import os
 import struct
 import tempfile
-from typing import List, Optional, Tuple
 
 try:
     import numpy as np
@@ -51,10 +50,10 @@ def to_list(data: object) -> list:
 
 
 def weighted_aggregate(
-    embeddings: List[List[float]],
-    timestamps: List[float],
+    embeddings: list[list[float]],
+    timestamps: list[float],
     alpha: float = 1.0,
-) -> List[float]:
+) -> list[float]:
     """Exponential-decay weighted average across embeddings."""
     if not embeddings:
         return []
@@ -89,7 +88,7 @@ def weighted_aggregate(
 # -----------------------------------------------------------------------
 
 
-def fuse_multilevel(level_representations: List[List[float]]) -> List[float]:
+def fuse_multilevel(level_representations: list[list[float]]) -> list[float]:
     """Element-wise mean of non-empty level representations."""
     if not level_representations:
         return []
@@ -114,16 +113,16 @@ def fuse_multilevel(level_representations: List[List[float]]) -> List[float]:
 
 
 def compute_temporal_distances(
-    context_timestamps: List[float],
-    mask_timestamps: List[float],
-) -> List[float]:
+    context_timestamps: list[float],
+    mask_timestamps: list[float],
+) -> list[float]:
     """Min temporal distance from each context timestamp to nearest mask timestamp."""
     if HAS_NUMPY:
         ct = np.asarray(context_timestamps, dtype=np.float64)[:, None]  # (C, 1)
         mt = np.asarray(mask_timestamps, dtype=np.float64)[None, :]  # (1, M)
         dists = np.abs(ct - mt).min(axis=1)  # (C,)
         return dists.tolist()
-    distances: List[float] = []
+    distances: list[float] = []
     for c in context_timestamps:
         min_dist = min((abs(c - m) for m in mask_timestamps), default=0.0)
         distances.append(min_dist)
@@ -131,9 +130,9 @@ def compute_temporal_distances(
 
 
 def dense_context_loss(
-    context_embeddings: List[List[float]],
-    target_embeddings: List[List[float]],
-    distances: List[float],
+    context_embeddings: list[list[float]],
+    target_embeddings: list[list[float]],
+    distances: list[float],
     lambda_coeff: float,
     distance_floor: float,
 ) -> float:
@@ -172,10 +171,10 @@ def dense_context_loss(
 
 
 def compute_trend(
-    embeddings: List[List[float]],
-    timestamps: List[float],
+    embeddings: list[list[float]],
+    timestamps: list[float],
     alpha: float = 1.0,
-) -> List[float]:
+) -> list[float]:
     """Compute exponentially-weighted trend from consecutive deltas."""
     if HAS_NUMPY:
         emb = np.asarray(embeddings, dtype=np.float64)  # (N, D)
@@ -211,7 +210,7 @@ def compute_trend(
     return [v / total_w for v in trend]
 
 
-def extrapolate(last: List[float], trend: List[float], num_steps: int) -> List[List[float]]:
+def extrapolate(last: list[float], trend: list[float], num_steps: int) -> list[list[float]]:
     """Extrapolate from last embedding along trend."""
     if HAS_NUMPY:
         last_arr = np.asarray(last, dtype=np.float64)  # (D,)
@@ -232,7 +231,7 @@ def extrapolate(last: List[float], trend: List[float], num_steps: int) -> List[L
 # -----------------------------------------------------------------------
 
 
-def temporal_position_encoding(timestamp: float, dim: int) -> List[float]:
+def temporal_position_encoding(timestamp: float, dim: int) -> list[float]:
     """Sinusoidal position encoding."""
     if HAS_NUMPY:
         indices = np.arange(dim, dtype=np.float64)
@@ -261,7 +260,7 @@ def temporal_position_encoding(timestamp: float, dim: int) -> List[float]:
 # -----------------------------------------------------------------------
 
 
-def cosine_similarity(a: List[float], b: List[float]) -> float:
+def cosine_similarity(a: list[float], b: list[float]) -> float:
     """Cosine similarity between two vectors."""
     if HAS_NUMPY:
         va = np.asarray(a, dtype=np.float64)
@@ -282,9 +281,9 @@ def cosine_similarity(a: List[float], b: List[float]) -> float:
 
 
 def batch_cosine_similarity(
-    matrix_a: List[List[float]],
-    matrix_b: List[List[float]],
-) -> List[List[float]]:
+    matrix_a: list[list[float]],
+    matrix_b: list[list[float]],
+) -> list[list[float]]:
     """Pairwise cosine similarity between rows of two matrices.
 
     Returns an (N_a, N_b) similarity matrix.
@@ -315,15 +314,15 @@ def batch_cosine_similarity(
 
 
 def streaming_ema_batch(
-    representation: List[float],
-    embeddings: List[List[float]],
-    timestamps: List[float],
+    representation: list[float],
+    embeddings: list[list[float]],
+    timestamps: list[float],
     alpha: float,
-    last_timestamp: Optional[float],
+    last_timestamp: float | None,
     count: int,
-    running_mean: List[float],
-    running_m2: List[float],
-) -> Tuple[List[float], float, int, List[float], List[float]]:
+    running_mean: list[float],
+    running_m2: list[float],
+) -> tuple[list[float], float, int, list[float], list[float]]:
     """Process a batch of events through streaming EMA + Welford stats.
 
     Returns (new_repr, last_ts, new_count, new_mean, new_m2).
@@ -406,10 +405,10 @@ def streaming_ema_batch(
 
 
 def detect_patterns_zscore(
-    values: List[float],
+    values: list[float],
     z_threshold: float = 1.5,
     fallback_k: int = 5,
-) -> List[int]:
+) -> list[int]:
     """Return indices of salient dimensions via z-score thresholding."""
     if len(values) < 2:
         return list(range(len(values)))
@@ -447,9 +446,9 @@ def detect_patterns_zscore(
 
 
 def apply_offset(
-    embeddings: List[List[float]],
-    offset: List[float],
-) -> List[List[float]]:
+    embeddings: list[list[float]],
+    offset: list[float],
+) -> list[list[float]]:
     """Add offset vector to each embedding."""
     if HAS_NUMPY:
         emb = np.asarray(embeddings, dtype=np.float64)
@@ -476,11 +475,11 @@ class MmapEmbeddingStore:
         self.embedding_dim = embedding_dim
         self._count = 0
         self._capacity = max(capacity, 256)
-        self._fd: Optional[int] = None
-        self._path: Optional[str] = None
-        self._mmap: Optional[mmap.mmap] = None
-        self._np_mmap: Optional[object] = None
-        self._timestamps: List[float] = []
+        self._fd: int | None = None
+        self._path: str | None = None
+        self._mmap: mmap.mmap | None = None
+        self._np_mmap: object | None = None
+        self._timestamps: list[float] = []
 
         if embedding_dim > 0:
             self._allocate(self._capacity)
@@ -514,7 +513,7 @@ class MmapEmbeddingStore:
             new_cap = max(needed, self._capacity * 2)
             self._allocate(new_cap)
 
-    def append(self, embedding: List[float], timestamp: float) -> None:
+    def append(self, embedding: list[float], timestamp: float) -> None:
         """Append a single embedding."""
         self._ensure_capacity(self._count + 1)
         if HAS_NUMPY and self._np_mmap is not None:
@@ -526,7 +525,7 @@ class MmapEmbeddingStore:
         self._timestamps.append(timestamp)
         self._count += 1
 
-    def append_batch(self, embeddings: List[List[float]], timestamps: List[float]) -> None:
+    def append_batch(self, embeddings: list[list[float]], timestamps: list[float]) -> None:
         """Append multiple embeddings at once."""
         n = len(embeddings)
         if n == 0:
@@ -545,7 +544,7 @@ class MmapEmbeddingStore:
         self._timestamps.extend(timestamps)
         self._count += n
 
-    def get_embeddings(self, start: int = 0, end: Optional[int] = None) -> List[List[float]]:
+    def get_embeddings(self, start: int = 0, end: int | None = None) -> list[list[float]]:
         """Read embeddings as nested lists."""
         if end is None:
             end = self._count
@@ -562,7 +561,7 @@ class MmapEmbeddingStore:
             result.append(row)
         return result
 
-    def get_numpy(self, start: int = 0, end: Optional[int] = None) -> object:
+    def get_numpy(self, start: int = 0, end: int | None = None) -> object:
         """Return numpy view of stored embeddings (zero-copy if numpy available)."""
         if end is None:
             end = self._count
@@ -571,7 +570,7 @@ class MmapEmbeddingStore:
             return self._np_mmap[start:end]
         return self.get_embeddings(start, end)
 
-    def get_timestamps(self, start: int = 0, end: Optional[int] = None) -> List[float]:
+    def get_timestamps(self, start: int = 0, end: int | None = None) -> list[float]:
         if end is None:
             end = self._count
         return self._timestamps[start:end]

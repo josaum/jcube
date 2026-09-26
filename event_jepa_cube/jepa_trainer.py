@@ -166,7 +166,7 @@ def load_raw_events(
             arrow = con.execute(
                 f'SELECT * FROM "{tt.name}" {where} '
                 f'ORDER BY "{tt.timestamp_column}"'
-            ).fetch_arrow_table()
+            ).to_arrow_table()
         except Exception:
             continue
         if len(arrow) == 0:
@@ -250,7 +250,7 @@ class JEPATrainer:
     def __init__(
         self,
         db_path: str,
-        model_name: str = "Qwen/Qwen3.5-0.8B",
+        model_name: str = "Qwen/Qwen3.6-0.8B",
         embedding_dim: int = 64,
         predictor_hidden: int = 256,
         ema_tau: float = 0.996,

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import statistics
 from collections.abc import Iterable
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable
 
 from . import numpy_ops as npo
 from .sequence import EventSequence
@@ -25,7 +25,7 @@ class EventJEPA:
         embedding_dim: int = 768,
         num_levels: int = 1,
         temporal_resolution: str = "adaptive",
-        regularizer: Optional[Callable[[List[List[float]]], float]] = None,
+        regularizer: Callable[[list[list[float]]], float] | None = None,
         reg_weight: float = 0.05,
         modality_aware: bool = False,
     ) -> None:
@@ -35,8 +35,8 @@ class EventJEPA:
         self.regularizer = regularizer
         self.reg_weight = reg_weight
         self.modality_aware = modality_aware
-        self._modality_configs: Dict[str, Dict[str, Any]] = {}
-        self._modality_offsets: Dict[str, List[float]] = {}
+        self._modality_configs: dict[str, dict[str, Any]] = {}
+        self._modality_offsets: dict[str, list[float]] = {}
 
     # ------------------------------------------------------------------
     # Helpers
@@ -44,24 +44,24 @@ class EventJEPA:
 
     @staticmethod
     def _weighted_aggregate(
-        embeddings: List[List[float]],
-        timestamps: List[float],
+        embeddings: list[list[float]],
+        timestamps: list[float],
         alpha: float = 1.0,
-    ) -> List[float]:
+    ) -> list[float]:
         """Aggregate *embeddings* using exponential-decay weighting."""
         return npo.weighted_aggregate(embeddings, timestamps, alpha)
 
     def _partition_adaptive(
         self,
-        embeddings: List[List[float]],
-        timestamps: List[float],
-    ) -> List[List[int]]:
+        embeddings: list[list[float]],
+        timestamps: list[float],
+    ) -> list[list[int]]:
         """Split indices into windows using gaps > median inter-event interval."""
         if len(timestamps) <= 1:
             return [list(range(len(timestamps)))]
         gaps = [timestamps[i + 1] - timestamps[i] for i in range(len(timestamps) - 1)]
         median_gap = statistics.median(gaps)
-        windows: List[List[int]] = [[0]]
+        windows: list[list[int]] = [[0]]
         for i in range(1, len(timestamps)):
             if (timestamps[i] - timestamps[i - 1]) > median_gap:
                 windows.append([i])
@@ -71,9 +71,9 @@ class EventJEPA:
 
     def _partition_fixed(
         self,
-        embeddings: List[List[float]],
-        timestamps: List[float],
-    ) -> List[List[int]]:
+        embeddings: list[list[float]],
+        timestamps: list[float],
+    ) -> list[list[int]]:
         """Split indices into equal-width time bins."""
         if not timestamps:
             return []
@@ -82,7 +82,7 @@ class EventJEPA:
             return [list(range(len(timestamps)))]
         num_bins = max(2, len(timestamps) // 2)
         bin_width = (t_max - t_min) / num_bins
-        windows: List[List[int]] = [[] for _ in range(num_bins)]
+        windows: list[list[int]] = [[] for _ in range(num_bins)]
         for i, t in enumerate(timestamps):
             b = int((t - t_min) / bin_width)
             if b >= num_bins:
@@ -110,9 +110,9 @@ class EventJEPA:
 
     def _apply_modality_offset(
         self,
-        embeddings: List[List[float]],
+        embeddings: list[list[float]],
         modality: str,
-    ) -> List[List[float]]:
+    ) -> list[list[float]]:
         """Add modality-specific embedding offset if registered."""
         if not self.modality_aware:
             return embeddings
@@ -122,15 +122,15 @@ class EventJEPA:
         return npo.apply_offset(embeddings, offset)
 
     @staticmethod
-    def _temporal_position_encoding(timestamp: float, dim: int) -> List[float]:
+    def _temporal_position_encoding(timestamp: float, dim: int) -> list[float]:
         """Sinusoidal position encoding for a temporal position."""
         return npo.temporal_position_encoding(timestamp, dim)
 
     @staticmethod
     def _compute_temporal_distances(
-        context_timestamps: List[float],
-        mask_timestamps: List[float],
-    ) -> List[float]:
+        context_timestamps: list[float],
+        mask_timestamps: list[float],
+    ) -> list[float]:
         """Min temporal distance from each context timestamp to nearest mask timestamp."""
         return npo.compute_temporal_distances(context_timestamps, mask_timestamps)
 
@@ -141,18 +141,18 @@ class EventJEPA:
     def register_modality_config(
         self,
         modality: str,
-        temporal_resolution: Optional[str] = None,
-        alpha: Optional[float] = None,
+        temporal_resolution: str | None = None,
+        alpha: float | None = None,
     ) -> None:
         """Register modality-specific processing parameters."""
-        cfg: Dict[str, Any] = {}
+        cfg: dict[str, Any] = {}
         if temporal_resolution is not None:
             cfg["temporal_resolution"] = temporal_resolution
         if alpha is not None:
             cfg["alpha"] = alpha
         self._modality_configs[modality] = cfg
 
-    def set_modality_offset(self, modality: str, offset: List[float]) -> None:
+    def set_modality_offset(self, modality: str, offset: list[float]) -> None:
         """Set an additive modality embedding offset (V-JEPA 2.1 modality tokens)."""
         self._modality_offsets[modality] = offset
 
@@ -160,12 +160,12 @@ class EventJEPA:
     # Public API
     # ------------------------------------------------------------------
 
-    def process(self, sequence: EventSequence) -> List[float]:
+    def process(self, sequence: EventSequence) -> list[float]:
         """Hierarchical temporal aggregation."""
         levels = self.process_multilevel(sequence)
         return levels[-1] if levels else []
 
-    def process_multilevel(self, sequence: EventSequence) -> List[List[float]]:
+    def process_multilevel(self, sequence: EventSequence) -> list[list[float]]:
         """Hierarchical temporal aggregation returning all intermediate levels."""
         if not sequence.embeddings:
             return [[]]
@@ -181,7 +181,7 @@ class EventJEPA:
         resolution = self._get_modality_resolution(sequence.modality)
         alpha = self._get_modality_alpha(sequence.modality)
 
-        level_outputs: List[List[float]] = []
+        level_outputs: list[list[float]] = []
 
         for _level in range(self.num_levels):
             # Partition
@@ -191,8 +191,8 @@ class EventJEPA:
                 windows = self._partition_fixed(embeddings, timestamps)
 
             # Aggregate each window
-            new_embeddings: List[List[float]] = []
-            new_timestamps: List[float] = []
+            new_embeddings: list[list[float]] = []
+            new_timestamps: list[float] = []
             for win in windows:
                 win_embs = [embeddings[i] for i in win]
                 win_ts = [timestamps[i] for i in win]
@@ -213,15 +213,15 @@ class EventJEPA:
         return level_outputs
 
     @staticmethod
-    def fuse_multilevel(level_representations: List[List[float]]) -> List[float]:
+    def fuse_multilevel(level_representations: list[list[float]]) -> list[float]:
         """Fuse multi-level representations via element-wise mean-pooling."""
         return npo.fuse_multilevel(level_representations)
 
-    def detect_patterns(self, representation: Iterable[float]) -> List[int]:
+    def detect_patterns(self, representation: Iterable[float]) -> list[int]:
         """Detect salient dimensions via z-score thresholding."""
         return npo.detect_patterns_zscore(list(representation))
 
-    def predict_next(self, sequence: EventSequence, num_steps: int = 1) -> List[List[float]]:
+    def predict_next(self, sequence: EventSequence, num_steps: int = 1) -> list[list[float]]:
         """Exponentially-weighted moving-trend prediction."""
         if not sequence.embeddings:
             return []
@@ -239,8 +239,8 @@ class EventJEPA:
     def predict_next_positional(
         self,
         sequence: EventSequence,
-        target_timestamps: List[float],
-    ) -> List[List[float]]:
+        target_timestamps: list[float],
+    ) -> list[list[float]]:
         """Position-aware prediction conditioned on explicit target timestamps."""
         if not sequence.embeddings:
             return []
@@ -265,7 +265,7 @@ class EventJEPA:
             avg_interval = 1.0
 
         # Predict at each target timestamp with position-modulated trend
-        predictions: List[List[float]] = []
+        predictions: list[list[float]] = []
         for target_t in target_timestamps:
             dt_steps = (target_t - last_t) / avg_interval
             pos_enc = npo.temporal_position_encoding(target_t - last_t, dim)
@@ -275,7 +275,7 @@ class EventJEPA:
 
     def compute_regularized_loss(
         self,
-        embeddings: List[List[float]],
+        embeddings: list[list[float]],
         prediction_loss: float,
     ) -> float:
         """Combine prediction loss with an optional regularizer."""
@@ -286,10 +286,10 @@ class EventJEPA:
 
     def compute_dense_loss(
         self,
-        context_embeddings: List[List[float]],
-        context_timestamps: List[float],
-        target_embeddings: List[List[float]],
-        mask_timestamps: List[float],
+        context_embeddings: list[list[float]],
+        context_timestamps: list[float],
+        target_embeddings: list[list[float]],
+        mask_timestamps: list[float],
         prediction_loss: float,
         lambda_coeff: float = 0.5,
         distance_floor: float = 1.0,
@@ -306,9 +306,9 @@ class EventJEPA:
 
     def compute_multilevel_loss(
         self,
-        level_embeddings: List[List[List[float]]],
+        level_embeddings: list[list[list[float]]],
         prediction_loss: float,
-        level_weights: Optional[List[float]] = None,
+        level_weights: list[float] | None = None,
     ) -> float:
         """Apply regularization at each hierarchical level (deep self-supervision)."""
         if self.regularizer is None:

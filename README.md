@@ -238,6 +238,19 @@ rdmreg = RDMReg(
 reg_loss = rdmreg.compute_loss(embedding_batch)
 ```
 
+### NormReg — Representation-Norm Regularization
+
+From [BiJEPA (arXiv:2603.00049)](https://arxiv.org/abs/2603.00049). Penalizes deviation of per-sample squared norms from the isotropic Gaussian expectation `E[||z||^2] = d`. Symmetric (bidirectional) prediction without a stop-gradient or EMA teacher admits "representation explosion" — both predictors inflate norms instead of learning structure. NormReg closes that escape (and the collapse-to-zero one) while leaving the distribution's shape to SIGReg-family regularizers.
+
+```python
+from event_jepa_cube.regularizers import NormReg
+
+normreg = NormReg(target_scale=1.0)  # target for ||z||^2 / d
+
+# Loss = mean(( ||z||^2 / d - 1 )^2)
+reg_loss = normreg.compute_loss(embedding_batch)
+```
+
 ### Choosing a Regularizer
 
 | Regularizer | Use When | Complexity | Sparsity |
@@ -245,6 +258,28 @@ reg_loss = rdmreg.compute_loss(embedding_batch)
 | **SIGReg** | Self-supervised pretraining, replacing stop-gradients/EMA | O(N * M) | Dense |
 | **WeakSIGReg** | Supervised training stabilization, preventing collapse | O(N * K) | Dense |
 | **RDMReg** | Need sparse/interpretable features (anomaly detection, efficient inference) | O(N * M * log N) | Controllable |
+| **NormReg** | Symmetric/bidirectional prediction (BiJEPA); scale control alongside any of the above | O(N * d) | Dense |
+
+### Bidirectional Training — BiJEPATrainer
+
+From [BiJEPA (arXiv:2603.00049)](https://arxiv.org/abs/2603.00049). Trains a forward predictor (context → target) and a mirrored backward predictor (target → context) jointly, with cycle-consistency losses `g(f(ctx)) ≈ ctx` and `f(g(tgt)) ≈ tgt` capturing the informative signal in the inverse relationship that uni-directional prediction discards.
+
+```python
+from event_jepa_cube import BiJEPATrainer, MLPPredictor
+from event_jepa_cube.regularizers import WeakSIGReg
+
+forward = MLPPredictor(embedding_dim=768, context_length=5, num_steps=2)
+
+trainer = BiJEPATrainer(
+    forward,                      # backward predictor auto-mirrored
+    cycle_weight=1.0,             # weight of the two cycle-consistency terms
+    norm_weight=0.01,             # NormReg against representation explosion
+    regularizer=WeakSIGReg(),     # optional SIGReg-family term
+)
+
+history = trainer.train(sequences, epochs=100)
+metrics = trainer.evaluate(sequences)  # forward_mse, backward_mse, cycle_mse, cosine_similarity
+```
 
 ### Integrated Usage
 
@@ -382,6 +417,8 @@ The regularizer implementations are based on the following papers:
 - **Weak-SIGReg** — Covariance Regularization for Stable Deep Learning. Adapts SIGReg as a general optimization stabilizer for supervised training. [arXiv:2603.05924](https://arxiv.org/abs/2603.05924)
 
 - **Rectified LpJEPA** — Joint-Embedding Predictive Architectures with Sparse and Maximum-Entropy Representations. Generalizes Gaussian JEPAs via RDMReg for controllable sparsity. [arXiv:2602.01456](https://arxiv.org/abs/2602.01456)
+
+- **BiJEPA** — Bi-directional Joint Embedding Predictive Architecture for Symmetric Representation Learning. Adds cycle-consistent bidirectional prediction with representation-norm regularization. [arXiv:2603.00049](https://arxiv.org/abs/2603.00049)
 
 ## Citation
 

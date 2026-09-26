@@ -1,4 +1,4 @@
-"""V6 Dense Temporal JEPA pipeline — World Model Architecture.
+"""V6.2 Dense Temporal JEPA pipeline — Temporal Graph world model.
 
 Builds on V5's 35.2M-node / 165M-edge healthcare TKG. Key changes from V5:
     - REMOVES all auxiliary topological losses (edge_type_pred, link_pred,
@@ -17,8 +17,10 @@ Loss function:
 
 That's it. Two terms. Everything else is architectural.
 
-Output contract (unchanged):
-    (num_nodes, 128) tensor saved as node_embeddings.pt
+Output contract:
+    - (num_nodes, 128) tensor saved as node_embeddings.pt
+    - node_vocab_sample.json for lightweight inspection
+    - optional node_vocab_full.json for exact downstream symbol alignment
 
 Usage:
     modal run --detach event_jepa_cube/scale_pipeline_v6.py --action full
@@ -83,7 +85,10 @@ except ImportError:
 
 @dataclass
 class V6Config:
-    """All hyperparameters centralized for V6 Dense Temporal JEPA."""
+    """All hyperparameters centralized for V6.2 Dense Temporal JEPA."""
+
+    version: str = "v6.2"
+    graph_mode: str = "temporal_graph"
 
     # Dimensions — 128 for single A100-80GB
     latent_dim: int = 128
@@ -128,6 +133,12 @@ class V6Config:
     # Dense Temporal Lookahead
     lookahead_steps: int = 5
     lookahead_decay: float = 0.8
+    # "cross_entity": legacy V6.2 objective — batch seeds sorted by time, seed i
+    #   predicts seed i+k's EMA representation (seeds are unrelated entities).
+    # "same_entity": time-cutoff objective — online encoder sees only edges up
+    #   to a per-batch cutoff t_c, and each seed predicts its OWN full-history
+    #   EMA representation at dt = t_last - t_c. Causal and entity-grounded.
+    lookahead_mode: str = "cross_entity"
 
     # Dense Temporal Predictor
     predictor_hidden_mult: int = 2
@@ -150,6 +161,9 @@ class V6Config:
     artifact_dir: str = "/root/jepa-artifacts/tkg-v6.2"
     v5_artifact_dir: str = "/root/jepa-artifacts/tkg-v5"
     v6_artifact_dir: str = "/root/jepa-artifacts/tkg-v6"  # for warm-start from V6 epoch 3
+    export_full_node_vocab: bool = False
+    full_node_vocab_filename: str = "node_vocab_full.json"
+    disable_warm_start: bool = False
 
     # AMP
     use_amp: bool = True
@@ -240,16 +254,42 @@ INSTANCE_TYPES = {
 
 _TS_TYPES = {"TIMESTAMP", "TIMESTAMP WITH TIME ZONE", "DATE", "DATETIME", "TIMESTAMPTZ"}
 
-# Numeric columns to extract per table (column_name -> predicate_suffix)
-NUMERIC_COLUMNS = {
-    "VL_TOTAL": True,
-    "VL_GLOSA_FECHAMENTO": True,
-    "VL_GLOSA": True,
-    "NR_QTD_GLOSADO": True,
-    "NR_QTD": True,
-    "VL_UNITARIO": True,
-    "VL_COBRADO": True,
-}
+# Numeric column extraction priority per table. Order is load-bearing:
+# a table with several numeric columns always contributes the same one
+# (totals before components, values before quantities). Iterating a set here
+# would make the materialized graph depend on per-process hash randomization.
+NUMERIC_PRIORITY: tuple[str, ...] = (
+    "VL_TOTAL",
+    "VL_COBRADO",
+    "VL_UNITARIO",
+    "VL_GLOSA",
+    "VL_GLOSA_FECHAMENTO",
+    "NR_QTD_GLOSADO",
+    "NR_QTD",
+)
+
+
+def _pick_numeric_column(col_names: list[str]) -> str | None:
+    """Pick the numeric column a table contributes to edge features, by priority."""
+    for candidate in NUMERIC_PRIORITY:
+        if candidate in col_names:
+            return candidate
+    return None
+
+
+def _clean_state_dict(state: dict[str, Any]) -> dict[str, Any]:
+    """Strip torch.compile/DDP prefixes from checkpoint state-dict keys.
+
+    Legacy V6.2 checkpoints were saved from compiled modules ("_orig_mod."
+    prefix); current checkpoints are saved from bare modules. Accept both.
+    """
+    cleaned = {}
+    for key, value in state.items():
+        for prefix in ("module.", "_orig_mod."):
+            if key.startswith(prefix):
+                key = key[len(prefix):]
+        cleaned[key] = value
+    return cleaned
 
 
 # ---------------------------------------------------------------------------
@@ -262,7 +302,7 @@ hf_cache = modal.Volume.from_name("hf-cache", create_if_missing=True)
 jepa_cache = modal.Volume.from_name("jepa-cache", create_if_missing=True)
 data_vol = modal.Volume.from_name("jcube-data", create_if_missing=True)
 
-VOLUMES = {
+VOLUMES: Any = {
     "/root/.cache/huggingface": hf_cache,
     "/root/jepa-artifacts": jepa_cache,
     "/data": data_vol,
@@ -271,7 +311,7 @@ VOLUMES = {
 # CPU image for DuckDB materialization (no GPU needed)
 cpu_image = (
     modal.Image.debian_slim(python_version="3.12")
-    .pip_install("duckdb>=1.2.0", "pyarrow>=18.0")
+    .pip_install("duckdb>=1.5.2", "pyarrow>=23.0.1")
 )
 
 # V6 GPU image — BGE-M3 via sentence-transformers, PyG
@@ -282,9 +322,9 @@ gpu_image_v6 = (
     .entrypoint([])
     .env({"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"})
     .pip_install(
-        "torch>=2.6",
+        "torch==2.12.0",
         "numpy>=2.0",
-        "pyarrow>=18.0",
+        "pyarrow>=23.0.1",
         "transformers>=4.50",
         "sentence-transformers>=3.0",
         "accelerate>=0.35",
@@ -292,8 +332,8 @@ gpu_image_v6 = (
     )
     .pip_install("torch_geometric>=2.6")
     .pip_install(
-        "torch_scatter", "torch_sparse", "torch_cluster",  # no pyg-lib (no wheel for torch 2.10)
-        find_links="https://data.pyg.org/whl/torch-2.10.0+cu128.html",
+        "pyg_lib",
+        find_links="https://data.pyg.org/whl/torch-2.12.0+cu130.html",
     )
 )
 
@@ -314,6 +354,7 @@ def materialize_remote(
     catalog_json: str,
     db_path: str = "/data/aggregated_fixed_union.db",
     output_path: str = "/data/jcube_graph_v6.parquet",
+    ontology_output_path: str = "/data/ontology_nodes.parquet",
 ) -> MaterializeStats:
     """Materialize edges inside Modal container.
 
@@ -336,11 +377,6 @@ def materialize_remote(
     ]
     ts_types = {"TIMESTAMP", "TIMESTAMP WITH TIME ZONE", "DATE", "DATETIME", "TIMESTAMPTZ"}
 
-    numeric_cols_set = {
-        "VL_TOTAL", "VL_GLOSA_FECHAMENTO", "VL_GLOSA",
-        "NR_QTD_GLOSADO", "NR_QTD", "VL_UNITARIO", "VL_COBRADO",
-    }
-
     selects = []
     for table in tables:
         t_name = table["name"]
@@ -360,12 +396,7 @@ def materialize_remote(
         subject_col = id_cols[0]
         subj_type = subject_col.replace("ID_CD_", "")
 
-        # Find numeric column for this table (first match wins)
-        num_col = None
-        for nc_name in numeric_cols_set:
-            if nc_name in col_names:
-                num_col = nc_name
-                break
+        num_col = _pick_numeric_column(col_names)
 
         numeric_expr = f'COALESCE(CAST("{num_col}" AS DOUBLE), 0.0)' if num_col else "0.0"
 
@@ -480,7 +511,7 @@ def materialize_remote(
             f"WHERE \"{id_cols_t[0]}\" IS NOT NULL"
         )
 
-    ontology_path = "/data/ontology_nodes.parquet"
+    ontology_path = ontology_output_path
     if ontology_queries:
         union_q = " UNION ALL ".join(ontology_queries)
         con.execute(f"""
@@ -888,67 +919,66 @@ def _build_nn_modules() -> dict[str, Any]:
                 return memory[node_ids.to(memory.device)]
             return memory[node_ids.cpu()].to(device)
 
-        def compute_messages(
+        def integrate_batch(
             self,
-            src_ids: torch.Tensor,
-            dst_ids: torch.Tensor,
+            batch_memory: torch.Tensor,
+            local_src: torch.Tensor,
+            local_dst: torch.Tensor,
             edge_feat: torch.Tensor,
-            device: torch.device,
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-            """Compute messages for edges in batch."""
-            memory = cast(torch.Tensor, self.memory)
-            if self.gpu_resident:
-                mem_src = memory[src_ids.to(memory.device)]
-                mem_dst = memory[dst_ids.to(memory.device)]
-            else:
-                mem_src = memory[src_ids.cpu()].to(device)
-                mem_dst = memory[dst_ids.cpu()].to(device)
-            msg_input = torch.cat([mem_src, mem_dst, edge_feat], dim=-1)
+            """Integrate batch edges into memory WITH gradients.
+
+            The returned batch memory participates in the current forward pass,
+            so the loss trains msg_fn and the GRU. (The previous post-step
+            update ran entirely under no_grad — msg_fn/GRU never learned.)
+
+            Args:
+                batch_memory: (N_batch, mem_dim) stale memory for batch nodes,
+                    gathered as a constant (no grad).
+                local_src, local_dst: (E,) LOCAL node indices into batch_memory.
+                edge_feat: (E, edge_feat_dim) edge features (detached upstream).
+
+            Returns:
+                (updated_batch_memory, unique_local, new_mem) where
+                updated_batch_memory carries gradients for msg_fn/GRU,
+                unique_local indexes the updated rows, and new_mem is the
+                updated memory for those rows (commit after the optimizer step
+                via commit_batch).
+            """
+            msg_input = torch.cat(
+                [batch_memory[local_src], batch_memory[local_dst], edge_feat], dim=-1
+            )
             messages = self.msg_fn(msg_input)
 
-            all_nodes = torch.cat([src_ids, dst_ids])
-            if not self.gpu_resident:
-                all_nodes = all_nodes.cpu()
+            all_local = torch.cat([local_src, local_dst])
             all_msgs = torch.cat([messages, messages], dim=0)
+            unique_local, inverse = torch.unique(all_local, return_inverse=True)
 
-            unique_nodes, inverse = torch.unique(all_nodes, return_inverse=True)
-
-            agg = torch.zeros(unique_nodes.size(0), self.msg_dim, device=device)
+            agg = torch.zeros(
+                unique_local.size(0), self.msg_dim,
+                device=all_msgs.device, dtype=all_msgs.dtype,
+            )
             agg.scatter_reduce_(
                 0,
-                inverse.to(device).unsqueeze(-1).expand(-1, self.msg_dim),
+                inverse.unsqueeze(-1).expand(-1, self.msg_dim),
                 all_msgs,
                 reduce="mean",
                 include_self=False,
             )
 
-            return unique_nodes, agg, messages
+            new_mem = self.gru(agg, batch_memory[unique_local])
+            updated = batch_memory.clone()
+            updated[unique_local] = new_mem
+            return updated, unique_local, new_mem
 
-        def update_memory(
-            self,
-            unique_nodes: torch.Tensor,
-            agg_messages: torch.Tensor,
-            timestamps: torch.Tensor | None = None,
-        ) -> None:
-            """Update memory for nodes in this batch using GRU."""
-            device = agg_messages.device
+        def commit_batch(self, global_ids: torch.Tensor, new_mem: torch.Tensor) -> None:
+            """Persist detached batch memory updates into the memory buffer."""
             memory = cast(torch.Tensor, self.memory)
-            last_update = cast(torch.Tensor, self.last_update)
+            values = new_mem.detach().float()
             if self.gpu_resident:
-                node_idx = unique_nodes.to(memory.device)
-                old_mem = memory[node_idx]
+                memory[global_ids.to(memory.device)] = values.to(memory.device)
             else:
-                old_mem = memory[unique_nodes.cpu()].to(device)
-            new_mem = self.gru(agg_messages, old_mem)
-
-            if self.gpu_resident:
-                memory[node_idx] = new_mem.detach()
-                if timestamps is not None:
-                    last_update[node_idx] = timestamps.to(memory.device)
-            else:
-                memory[unique_nodes.cpu()] = new_mem.detach().cpu()
-                if timestamps is not None:
-                    last_update[unique_nodes.cpu()] = timestamps.cpu()
+                memory[global_ids.cpu()] = values.cpu()
 
         def detach_memory(self) -> None:
             """Detach memory from computation graph (call between epochs)."""
@@ -1065,7 +1095,13 @@ def _build_nn_modules() -> dict[str, Any]:
                 t_target = node_time[target_nodes]
                 delta_t = t_target - edge_time
 
-                # Strict causality: mask out future edges (delta_t < 0)
+                # Recency guard: drop edges timestamped after the target
+                # node's last event. NOTE: node_time is each node's MAX
+                # incident edge time, so delta_t >= 0 holds by construction
+                # and this mask is a no-op on real data — it does NOT provide
+                # temporal causality. Causal context comes from
+                # lookahead_mode="same_entity", which cuts edges at t_c
+                # before this encoder runs.
                 causal_mask = delta_t >= 0
                 if not causal_mask.all():
                     edge_index = edge_index[:, causal_mask]
@@ -1269,20 +1305,21 @@ class V6Trainer:
         # Load graph (with numeric values)
         self._load_graph(parquet_path)
 
-        # Build vocabulary (with caching)
+        # Build vocabulary (with caching, rank 0 writes)
         self._build_vocab_cached()
 
-        # Encode ontology with BGE-M3 (with caching)
+        # Encode ontology with BGE-M3 (with caching; rank 0 encodes, other
+        # ranks wait at the barrier and read the cache — previously all ranks
+        # encoded concurrently and raced jepa_cache.commit())
+        self._barrier_non_main()
         self._encode_ontology_cached(ontology_path)
+        self._barrier_main()
 
         # Init embeddings (with V5 warm-start)
         self._init_embeddings()
 
         # Build graph data object
         self._build_graph_data()
-
-        # Build CSR cache
-        self._build_csr_cache()
 
         # Create models
         self._create_models()
@@ -1387,8 +1424,20 @@ class V6Trainer:
         import gc
         gc.collect()
 
+    def _barrier_main(self) -> None:
+        """Barrier reached by rank 0 AFTER doing shared cache work."""
+        if self.world_size > 1 and self.is_main:
+            import torch.distributed as dist
+            dist.barrier()
+
+    def _barrier_non_main(self) -> None:
+        """Barrier where non-main ranks wait for rank 0's shared cache work."""
+        if self.world_size > 1 and not self.is_main:
+            import torch.distributed as dist
+            dist.barrier()
+
     def _build_vocab_cached(self) -> None:
-        """Build node vocabulary, caching to volume."""
+        """Build node vocabulary, caching to volume (rank 0 writes)."""
         import os
 
         cache_path = os.path.join(self.cfg.artifact_dir, "node_vocab.json")
@@ -1398,9 +1447,12 @@ class V6Trainer:
             with open(cache_path) as f:
                 cached = json.load(f)
             if cached.get("num_nodes") == self.num_nodes:
-                print(f"  Node vocab cache hit ({self.num_nodes:,} nodes)")
+                if self.is_main:
+                    print(f"  Node vocab cache hit ({self.num_nodes:,} nodes)")
                 return
 
+        if not self.is_main:
+            return
         print(f"  Caching node vocab ({self.num_nodes:,} nodes)...")
         with open(cache_path, "w") as f:
             json.dump({"num_nodes": self.num_nodes, "num_predicates": self.num_predicates}, f)
@@ -1511,8 +1563,11 @@ class V6Trainer:
 
         dim = self.cfg.latent_dim  # 128
 
-        # Create embedding table
-        self.node_emb = nn.Embedding(self.num_nodes, dim).to(self.device)
+        # Create embedding table. sparse=True: a dense gradient here is an
+        # 18 GB allocation per step (35M x 128 fp32); sparse grads only carry
+        # the rows touched by the batch. Requires emb_momentum=0 and
+        # emb_weight_decay=0 (SGD supports sparse grads only without them).
+        self.node_emb = nn.Embedding(self.num_nodes, dim, sparse=True).to(self.device)
         nn.init.xavier_uniform_(self.node_emb.weight)
 
         # V6.1: try V6 epoch 3 first (same dim, better quality)
@@ -1535,7 +1590,10 @@ class V6Trainer:
         else:
             warm_path = None
 
-        if self.cfg.hospital_filter:
+        if self.cfg.disable_warm_start:
+            if self.is_main:
+                print("  Warm-start disabled by config")
+        elif self.cfg.hospital_filter:
             if self.is_main:
                 print(f"  Single-hospital mode — skipping warm-start (different node vocab)")
         elif warm_path is not None and os.path.exists(warm_path):
@@ -1666,33 +1724,10 @@ class V6Trainer:
         self.unique_src = torch.unique(self.edge_index[0])
         print(f"  Nodes with outgoing edges: {self.unique_src.shape[0]:,}")
 
-    def _build_csr_cache(self) -> None:
-        """Pre-build CSR adjacency and cache to volume."""
-        import os
-
-        import torch
-
-        csr_cache_path = os.path.join(self.cfg.artifact_dir, "csr_cache_v6.pt")
-        if os.path.exists(csr_cache_path):
-            print("  CSR cache exists, PyG will use optimized path")
-            return
-
-        print("  Pre-building CSR adjacency for NeighborLoader...")
-        t0 = time.time()
-        from torch_geometric.loader import NeighborLoader
-        dummy_loader = NeighborLoader(
-            self.graph_data,
-            num_neighbors=[5],
-            batch_size=32,
-            input_nodes=self.unique_src[:32],
-            num_workers=0,
-        )
-        _ = next(iter(dummy_loader))
-        del dummy_loader
-
-        torch.save({"built": True, "num_nodes": self.num_nodes}, csr_cache_path)
-        jepa_cache.commit()
-        print(f"  CSR pre-built in {time.time() - t0:.1f}s")
+    # NOTE: the former _build_csr_cache was removed — it saved only a marker
+    # file (PyG builds sampling structures per NeighborLoader instance, in
+    # process; nothing was ever cached or reused). Fast sampling depends on
+    # pyg_lib importing in the training image — verified by `--action smoke`.
 
     def _create_models(self) -> None:
         """Instantiate all V6 neural network models."""
@@ -1762,12 +1797,40 @@ class V6Trainer:
             f"numeric({cfg.numeric_dim}) = {cfg.edge_feat_dim}"
         )
 
-        # V6.1: torch.compile for fused GNN kernels (3-5x speedup on GPS layers)
+        # Forward wrappers. self.online_encoder / self.predictor stay BARE
+        # modules (EMA, checkpointing, and submodule access use them); the
+        # *_fwd attributes are what _train_step calls. In DDP mode the
+        # wrappers synchronize encoder/predictor gradients across ranks —
+        # without them each rank trains a divergent encoder and only rank 0's
+        # survives in the checkpoint (the V6.1/V6.2 4-GPU runs did exactly
+        # that; embedding deltas were summed across ranks under 4 different
+        # encoders).
+        import torch
+        self.encoder_fwd: Any = self.online_encoder
+        self.predictor_fwd: Any = self.predictor
+        self.target_fwd: Any = self.target_encoder
+
+        if self.world_size > 1:
+            from torch.nn.parallel import DistributedDataParallel as DDP
+            # find_unused_parameters: rwse_proj exists but rwse is never fed,
+            # so the encoder has genuinely unused params each step.
+            # The predictor is NOT DDP-wrapped: the legacy lookahead loop runs
+            # several predictor forwards before one backward, which DDP's
+            # reducer does not support — its (small) grads are all-reduced
+            # manually in _train_step, alongside the TGN's.
+            self.encoder_fwd = DDP(
+                self.online_encoder, device_ids=[self.rank], find_unused_parameters=True
+            )
+            if self.is_main:
+                print(f"\n  DDP wrapper active: encoder grads sync across {self.world_size} ranks "
+                      "(predictor/TGN grads all-reduced manually)")
+
+        # torch.compile AFTER DDP (Dynamo's DDPOptimizer splits graphs at
+        # bucket boundaries only when compiling the DDP-wrapped module).
         if cfg.use_compile:
-            import torch
-            print("\n  Compiling encoders with torch.compile (mode=reduce-overhead)...")
-            self.online_encoder = torch.compile(self.online_encoder, mode="default")
-            self.target_encoder = torch.compile(self.target_encoder, mode="default")
+            print("\n  Compiling encoder forwards with torch.compile (mode=default)...")
+            self.encoder_fwd = torch.compile(self.encoder_fwd, mode="default")
+            self.target_fwd = torch.compile(self.target_fwd, mode="default")
             print("  Encoders compiled (first batch will be slow due to tracing)")
 
     def _create_optimizer(self) -> None:
@@ -1791,6 +1854,10 @@ class V6Trainer:
         )
         self.trainable = self.emb_trainable + self.net_trainable
 
+        if cfg.emb_momentum != 0.0 or cfg.emb_weight_decay != 0.0:
+            raise ValueError(
+                "node_emb uses sparse gradients; SGD requires emb_momentum=0 and emb_weight_decay=0"
+            )
         self.optimizer_emb = torch.optim.SGD(
             self.emb_trainable,
             lr=cfg.lr * cfg.emb_lr_mult,
@@ -1887,15 +1954,16 @@ class V6Trainer:
         batch_node_time: torch.Tensor,
         B: int,
     ) -> torch.Tensor:
-        """Compute Dense Temporal Lookahead loss.
+        """Compute the legacy cross-entity Dense Temporal Lookahead loss.
 
-        For each seed node i, predicts the EMA representation of future
-        events at specific time offsets. The predictor sees the context
-        (online encoder output) and must match the EMA target for each
-        future time step.
-
-        Key difference from V5 lookahead: explicitly encodes delta-t as a
-        positional query, generating time-specific predictions.
+        Sorts the batch's seed nodes chronologically; seed i predicts the EMA
+        representation of seed i+k at that seed's timestamp. NOTE: seeds are
+        randomly sampled nodes, so consecutive-in-time seeds are generally
+        UNRELATED entities — this objective predicts a time-conditioned
+        population representation, not an entity's own future. Kept for
+        continuity with the trained V6.2 checkpoints; lookahead_mode
+        "same_entity" is the entity-grounded alternative (A/B before
+        committing a full run to either).
 
         Args:
             ctx_repr: (N_batch, dim) online encoder output
@@ -1918,7 +1986,7 @@ class V6Trainer:
         if B <= cfg.lookahead_steps:
             # Not enough nodes for multi-step prediction — single step
             dummy_dt = torch.ones(B, device=device) * 86400.0  # 1 day
-            z_pred = self.predictor(ctx_B, dummy_dt)
+            z_pred = self.predictor_fwd(ctx_B, dummy_dt)
             return F.mse_loss(z_pred, ema_B)
 
         total_loss = torch.tensor(0.0, device=device)
@@ -1948,7 +2016,7 @@ class V6Trainer:
             dt = (times_B[shift:] - times_B[:B - shift]).clamp(min=1.0)  # (B - shift,)
 
             # Predict
-            z_pred = self.predictor(context, dt)  # (B - shift, dim)
+            z_pred = self.predictor_fwd(context, dt)  # (B - shift, dim)
 
             # Continuous time decay: 7-day half-life
             # Each node gets its own weight based on actual chronological gap,
@@ -2004,12 +2072,51 @@ class V6Trainer:
             # Get node features from embedding table
             x = self.node_emb(batch.x.to(device))  # (N_batch, 128)
 
-            # Add TGN memory if enabled in this phase
+            # Temporal and numeric info
+            batch_node_time = batch.node_time.to(device) if hasattr(batch, 'node_time') else None
+            batch_edge_time = batch.edge_time.to(device) if hasattr(batch, 'edge_time') else None
+            batch_edge_numeric = batch.edge_numeric.to(device) if hasattr(batch, 'edge_numeric') else None
+            batch_vec = (
+                batch.batch.to(device)
+                if getattr(batch, 'batch', None) is not None
+                else torch.zeros(x.shape[0], dtype=torch.long, device=device)
+            )
+            edge_index_dev = batch.edge_index.to(device)
+            edge_attr_dev = batch.edge_attr.to(device)
+
+            # Add TGN memory if enabled in this phase. The batch's edges are
+            # integrated into memory INSIDE the gradient path so the loss
+            # trains msg_fn/GRU (they previously only ran under no_grad and
+            # stayed at random init); the buffer commit happens after the
+            # optimizer step.
+            tgn_commit: tuple[Any, Any] | None = None
             if phase.tgn_enabled:
                 batch_node_ids = batch.x.to(device)
-                tgn_mem = self.tgn.get_memory(batch_node_ids, device)
-                # Additive fusion: project TGN 64-dim to 128-dim latent space
-                # TGN memory fills the "temporal slots" of the embedding
+                tgn_mem = self.tgn.get_memory(batch_node_ids, device)  # stale, no grad
+                if edge_index_dev.size(1) > 0:
+                    # Edge features are detached: TGN trains via msg_fn/GRU
+                    # only, so encoder submodules aren't used outside the DDP
+                    # forward (which would break gradient bucketing).
+                    with torch.no_grad():
+                        pred_e = self.online_encoder.pred_emb(edge_attr_dev)
+                        if batch_edge_time is not None and batch_node_time is not None:
+                            dt_e = batch_node_time[edge_index_dev[1]] - batch_edge_time
+                            phi_t = self.online_encoder.time_encoder(dt_e)
+                        else:
+                            phi_t = torch.zeros(pred_e.size(0), cfg.time_dim, device=device)
+                        if batch_edge_numeric is not None:
+                            num_e = self.online_encoder.numeric_encoder(batch_edge_numeric)
+                        else:
+                            num_e = torch.zeros(pred_e.size(0), cfg.numeric_dim, device=device)
+                        edge_feat = self.online_encoder.edge_proj(
+                            torch.cat([pred_e, phi_t, num_e], dim=-1)
+                        )
+                    tgn_mem, unique_local, new_mem = self.tgn.integrate_batch(
+                        tgn_mem, edge_index_dev[0], edge_index_dev[1], edge_feat
+                    )
+                    tgn_commit = (batch_node_ids[unique_local], new_mem)
+                # Additive fusion: TGN 64-dim fills the tail "temporal slots"
+                # of the 128-dim latent
                 if tgn_mem.shape[1] < cfg.latent_dim:
                     tgn_mem_full = torch.cat([
                         torch.zeros(
@@ -2024,51 +2131,80 @@ class V6Trainer:
                     tgn_mem_full = tgn_mem
                 x = x + tgn_mem_full
 
-            # Temporal and numeric info
-            batch_node_time = batch.node_time.to(device) if hasattr(batch, 'node_time') else None
-            batch_edge_time = batch.edge_time.to(device) if hasattr(batch, 'edge_time') else None
-            batch_edge_numeric = batch.edge_numeric.to(device) if hasattr(batch, 'edge_numeric') else None
-            batch_vec = (
-                batch.batch.to(device)
-                if getattr(batch, 'batch', None) is not None
-                else torch.zeros(x.shape[0], dtype=torch.long, device=device)
-            )
+            if cfg.lookahead_mode == "same_entity":
+                # Same-entity objective: the online encoder sees only edges up
+                # to a per-batch cutoff t_c; each seed predicts its OWN
+                # full-history EMA representation at dt = t_last - t_c. Causal
+                # (context genuinely cannot see past t_c) and entity-grounded
+                # (no cross-patient pairing).
+                if batch_edge_time is not None and batch_edge_time.numel() > 0:
+                    q = 0.3 + 0.4 * torch.rand((), device=device)
+                    t_c = torch.quantile(batch_edge_time.float(), q)
+                else:
+                    t_c = torch.tensor(0.0, device=device)
+                ctx_mask = (
+                    batch_edge_time.float() <= t_c
+                    if batch_edge_time is not None
+                    else torch.ones(edge_index_dev.size(1), dtype=torch.bool, device=device)
+                )
 
-            # Online encoder
-            ctx_repr = self.online_encoder(
-                x, batch.edge_index.to(device), batch.edge_attr.to(device),
-                node_time=batch_node_time, edge_time=batch_edge_time,
-                edge_numeric=batch_edge_numeric,
-                batch=batch_vec,
-            )
+                ctx_repr = self.encoder_fwd(
+                    x, edge_index_dev[:, ctx_mask], edge_attr_dev[ctx_mask],
+                    node_time=batch_node_time,
+                    edge_time=batch_edge_time[ctx_mask] if batch_edge_time is not None else None,
+                    edge_numeric=batch_edge_numeric[ctx_mask] if batch_edge_numeric is not None else None,
+                    batch=batch_vec,
+                )
+                with torch.no_grad():
+                    x_target = self.node_emb(batch.x.to(device))
+                    if phase.tgn_enabled:
+                        x_target = x_target + tgn_mem_full.detach()
+                    tgt_repr = self.target_fwd(
+                        x_target, edge_index_dev, edge_attr_dev,
+                        node_time=batch_node_time, edge_time=batch_edge_time,
+                        edge_numeric=batch_edge_numeric,
+                        batch=batch_vec,
+                    )
 
-            # Target encoder (EMA, no grad)
-            with torch.no_grad():
-                x_target = self.node_emb(batch.x.to(device))
-                if phase.tgn_enabled:
-                    x_target = x_target + tgn_mem_full.detach()
-                tgt_repr = self.target_encoder(
-                    x_target, batch.edge_index.to(device), batch.edge_attr.to(device),
+                seed_time = (
+                    batch_node_time[:B].float()
+                    if batch_node_time is not None
+                    else torch.full((B,), float(t_c.item()), device=device)
+                )
+                dt = (seed_time - t_c).clamp(min=1.0)
+                valid = (seed_time > t_c).float()
+                z_pred = self.predictor_fwd(ctx_repr[:B], dt)
+                per_seed = torch.nn.functional.mse_loss(
+                    z_pred, tgt_repr[:B].detach(), reduction="none"
+                ).mean(dim=-1)
+                dense_loss = (valid * per_seed).sum() / valid.sum().clamp(min=1.0)
+            else:
+                # Legacy cross-entity objective (V6.2): batch seeds sorted by
+                # time; seed i predicts seed i+k's EMA representation.
+                ctx_repr = self.encoder_fwd(
+                    x, edge_index_dev, edge_attr_dev,
                     node_time=batch_node_time, edge_time=batch_edge_time,
                     edge_numeric=batch_edge_numeric,
                     batch=batch_vec,
                 )
+                with torch.no_grad():
+                    x_target = self.node_emb(batch.x.to(device))
+                    if phase.tgn_enabled:
+                        x_target = x_target + tgn_mem_full.detach()
+                    tgt_repr = self.target_fwd(
+                        x_target, edge_index_dev, edge_attr_dev,
+                        node_time=batch_node_time, edge_time=batch_edge_time,
+                        edge_numeric=batch_edge_numeric,
+                        batch=batch_vec,
+                    )
+                dense_loss = self._compute_dense_lookahead_loss(
+                    ctx_repr, tgt_repr.detach(), batch_node_time, B
+                )
 
-            # ============================================================
-            # LOSS 1: Dense Temporal Lookahead
-            # ============================================================
-            dense_loss = self._compute_dense_lookahead_loss(
-                ctx_repr, tgt_repr.detach(), batch_node_time, B
-            )
-
-            # ============================================================
             # LOSS 2: Weak-SIGReg (off-diagonal covariance only)
-            # ============================================================
             sigreg_loss = self.sigreg(ctx_repr[:B])
 
-            # ============================================================
             # TOTAL LOSS: L = L_dense + lambda * L_sigreg
-            # ============================================================
             loss = dense_loss + cfg.sigreg_lambda * sigreg_loss
 
         # Backward with scaler
@@ -2079,16 +2215,28 @@ class V6Trainer:
         # V6.2 FIX: Gradient diagnostic — verify embeddings receive gradients
         if self.total_steps < 5 and self.is_main:
             g = self.node_emb.weight.grad
-            if g is not None:
-                # Only compute norm (no materialization of full boolean tensor)
+            if g is None:
+                print(f"  [DIAG] step={self.total_steps} emb_grad=None (NO GRADIENT!)")
+            elif g.is_sparse:
+                gc_ = g.coalesce()
+                print(f"  [DIAG] step={self.total_steps} emb_grad_norm={gc_.values().norm().item():.6f} "
+                      f"sparse_rows={gc_.indices().shape[1]:,}")
+            else:
                 g_norm = g.norm().item()
-                # Sample a small slice to check sparsity
-                g_sample = g[:1000]
-                g_nnz_sample = (g_sample != 0).any(dim=1).sum().item()
+                g_nnz_sample = (g[:1000] != 0).any(dim=1).sum().item()
                 print(f"  [DIAG] step={self.total_steps} emb_grad_norm={g_norm:.6f} "
                       f"nonzero_rows(sample 1K)={g_nnz_sample}/1000")
-            else:
-                print(f"  [DIAG] step={self.total_steps} emb_grad=None (NO GRADIENT!)")
+
+        # DDP: encoder grads sync via the DDP wrapper; predictor and TGN
+        # msg_fn/GRU run outside it — reduce their grads manually.
+        if self.world_size > 1:
+            import torch.distributed as dist
+            manual_sync = list(self.predictor.parameters())
+            if phase.tgn_enabled:
+                manual_sync += list(self.tgn.msg_fn.parameters()) + list(self.tgn.gru.parameters())
+            for p in manual_sync:
+                if p.grad is not None:
+                    dist.all_reduce(p.grad, op=dist.ReduceOp.AVG)
 
         self.scaler.unscale_(self.optimizer_net)
         nn.utils.clip_grad_norm_(self.net_trainable, cfg.grad_clip)
@@ -2109,34 +2257,10 @@ class V6Trainer:
             for pe, po in zip(self.target_encoder.parameters(), self.online_encoder.parameters()):
                 pe.data.mul_(tau).add_(po.data, alpha=1 - tau)
 
-        # TGN memory update
-        if phase.tgn_enabled and batch.edge_index.size(1) > 0:
+        # TGN memory commit (integration happened in the gradient path above)
+        if tgn_commit is not None:
             with torch.no_grad():
-                ei = batch.edge_index.to(device)
-                # Build edge features for TGN message computation
-                pred_e = self.online_encoder.pred_emb(batch.edge_attr.to(device))
-                if batch_edge_time is not None and batch_node_time is not None:
-                    target_n = ei[1]
-                    dt = batch_node_time[target_n] - batch_edge_time
-                    phi_t = self.online_encoder.time_encoder(dt)
-                else:
-                    phi_t = torch.zeros(pred_e.size(0), cfg.time_dim, device=device)
-
-                if batch_edge_numeric is not None:
-                    num_e = self.online_encoder.numeric_encoder(batch_edge_numeric)
-                else:
-                    num_e = torch.zeros(pred_e.size(0), cfg.numeric_dim, device=device)
-
-                raw_edge_feat = torch.cat([pred_e, phi_t, num_e], dim=-1)
-                edge_feat = self.online_encoder.edge_proj(raw_edge_feat)
-
-                # Compute and update TGN memory
-                src_ids = batch.x[ei[0].cpu()]
-                dst_ids = batch.x[ei[1].cpu()]
-                unique_nodes, agg_msgs, _ = self.tgn.compute_messages(
-                    src_ids, dst_ids, edge_feat, device
-                )
-                self.tgn.update_memory(unique_nodes, agg_msgs)
+                self.tgn.commit_batch(tgn_commit[0], tgn_commit[1])
 
         metrics = {
             "total_loss": loss.item(),
@@ -2173,19 +2297,18 @@ class V6Trainer:
             "losses_log": self.losses_log,
             "config": self.cfg.to_json(),
         }
-        ckpt_path = os.path.join(ckpt_dir, f"checkpoint_epoch_{epoch + 1}.pt")
-        torch.save(ckpt, ckpt_path)
+        ckpt_name = f"checkpoint_epoch_{epoch + 1}.pt"
+        torch.save(ckpt, os.path.join(ckpt_dir, ckpt_name))
 
-        # Save latest checkpoint pointer
-        torch.save(ckpt, os.path.join(ckpt_dir, "checkpoint_latest.pt"))
+        # Latest pointer is a tiny JSON, not a second ~27GB copy of the
+        # checkpoint (the duplicate write cost ~90GB of volume churn/epoch).
+        with open(os.path.join(ckpt_dir, "checkpoint_latest.json"), "w") as f:
+            json.dump({"checkpoint": ckpt_name, "epoch": epoch}, f)
 
         # Save node embeddings as bare tensor for probe compatibility
+        # (node_embeddings.pt is written once by _save_final_artifacts)
         emb_path = os.path.join(ckpt_dir, f"node_emb_epoch_{epoch + 1}.pt")
         torch.save(self.node_emb.weight.detach().cpu(), emb_path)
-        torch.save(
-            self.node_emb.weight.detach().cpu(),
-            os.path.join(ckpt_dir, "node_embeddings.pt"),
-        )
 
         # Save config
         with open(os.path.join(ckpt_dir, "config.json"), "w") as f:
@@ -2198,32 +2321,57 @@ class V6Trainer:
         """Load and restore all state from checkpoint if available."""
         import torch
 
-        ckpt_path = os.path.join(self.cfg.artifact_dir, "checkpoint_latest.pt")
         if self.cfg.hospital_filter:
             print(f"  Single-hospital mode ({self.cfg.hospital_filter}) — skipping checkpoint resume")
             return
-        if not os.path.exists(ckpt_path):
+
+        # Prefer the JSON pointer; fall back to the legacy full-copy latest.
+        pointer_path = os.path.join(self.cfg.artifact_dir, "checkpoint_latest.json")
+        legacy_path = os.path.join(self.cfg.artifact_dir, "checkpoint_latest.pt")
+        ckpt_path = None
+        if os.path.exists(pointer_path):
+            with open(pointer_path) as f:
+                pointer = json.load(f)
+            candidate = os.path.join(self.cfg.artifact_dir, pointer.get("checkpoint", ""))
+            if os.path.exists(candidate):
+                ckpt_path = candidate
+        if ckpt_path is None and os.path.exists(legacy_path):
+            ckpt_path = legacy_path
+        if ckpt_path is None:
             print("  No checkpoint found, starting fresh")
             return
 
-        print("  Resuming from checkpoint...")
+        print(f"  Resuming from checkpoint {os.path.basename(ckpt_path)}...")
         ckpt = torch.load(ckpt_path, weights_only=False)
+
+        node_emb_weight = ckpt.get("node_emb_weight")
+        if isinstance(node_emb_weight, torch.Tensor):
+            expected_shape = tuple(self.node_emb.weight.shape)
+            actual_shape = tuple(node_emb_weight.shape)
+            if actual_shape != expected_shape:
+                print(
+                    "  Checkpoint shape mismatch "
+                    f"({actual_shape} vs {expected_shape}) — skipping checkpoint resume"
+                )
+                return
 
         self.start_epoch = ckpt["epoch"] + 1
         self.total_steps = ckpt["total_steps"]
         self.losses_log = ckpt.get("losses_log", [])
 
         # V6.2 FIX: Restore node embeddings from checkpoint (fixes amnesia bug)
-        if "node_emb_weight" in ckpt:
+        if isinstance(node_emb_weight, torch.Tensor):
             with torch.no_grad():
-                self.node_emb.weight.copy_(ckpt["node_emb_weight"].to(self.device))
-            print(f"  Restored node_emb from checkpoint ({ckpt['node_emb_weight'].shape})")
+                self.node_emb.weight.copy_(node_emb_weight.to(self.device))
+            print(f"  Restored node_emb from checkpoint ({node_emb_weight.shape})")
         else:
             print("  WARNING: Checkpoint has no node_emb_weight — using warm-start (legacy V6 checkpoint)")
 
-        self.online_encoder.load_state_dict(ckpt["online_encoder"])
-        self.target_encoder.load_state_dict(ckpt["target_encoder"])
-        self.predictor.load_state_dict(ckpt["predictor"])
+        # _clean_state_dict: current checkpoints save bare-module keys; legacy
+        # V6.2 checkpoints carry "_orig_mod." (compiled) prefixes.
+        self.online_encoder.load_state_dict(_clean_state_dict(ckpt["online_encoder"]))
+        self.target_encoder.load_state_dict(_clean_state_dict(ckpt["target_encoder"]))
+        self.predictor.load_state_dict(_clean_state_dict(ckpt["predictor"]))
 
         if "onto_projection" in ckpt:
             self.onto_projection.load_state_dict(ckpt["onto_projection"])
@@ -2308,9 +2456,10 @@ class V6Trainer:
     def train(self) -> TrainResult:
         """Main training loop over epochs/batches with 2-phase curriculum.
 
-        V6.1: DDP-aware — each rank processes a shard of input nodes.
-        Gradient sync happens automatically for encoder/predictor via DDP wrapper.
-        Embedding + TGN sync happens at epoch boundaries via all-reduce.
+        DDP: each rank processes a shard of input nodes. Encoder grads sync
+        per step via the DDP wrapper; predictor/TGN grads are all-reduced
+        manually in _train_step; embeddings + TGN memory sync at epoch
+        boundaries via all-reduce.
         """
         cfg = self.cfg
 
@@ -2500,8 +2649,9 @@ class V6Trainer:
         # Training summary
         with open(os.path.join(artifact_dir, "summary.json"), "w") as f:
             json.dump({
-                "version": "v6",
+                "version": self.cfg.version,
                 "architecture": "Dense Temporal JEPA",
+                "graph_mode": self.cfg.graph_mode,
                 "num_nodes": self.num_nodes,
                 "num_predicates": self.num_predicates,
                 "latent_dim": self.cfg.latent_dim,
@@ -2517,7 +2667,7 @@ class V6Trainer:
                 "sigreg_lambda": self.cfg.sigreg_lambda,
                 "curriculum_phases": [p.name for p in CURRICULUM_PHASES_V6],
                 "numeric_encoding": True,
-                "warm_start": "v5_epoch1_zeropad",
+                "warm_start": None if self.cfg.disable_warm_start else "v5_epoch1_zeropad",
             }, f, indent=2)
 
         # Node vocabulary for downstream
@@ -2526,8 +2676,71 @@ class V6Trainer:
         with open(vocab_path, "w") as f:
             json.dump(sample_vocab, f)
 
+        if self.cfg.export_full_node_vocab:
+            full_vocab_path = os.path.join(artifact_dir, self.cfg.full_node_vocab_filename)
+            with open(full_vocab_path, "w") as f:
+                json.dump(self.node_vocab, f)
+            print(f"  Exported full node vocab to {full_vocab_path} ({len(self.node_vocab):,} ids)")
+
         jepa_cache.commit()
         print(f"  Final artifacts saved to {artifact_dir}")
+
+
+# ---------------------------------------------------------------------------
+# Image smoke check — run BEFORE paying for H100 hours
+# ---------------------------------------------------------------------------
+
+
+@scale_app.function(image=gpu_image_v6, gpu="L4", timeout=900, volumes=VOLUMES)
+def smoke_check_image() -> dict[str, Any]:
+    """Cheap pre-flight: verify the training image actually works.
+
+    Checks the exact failure mode that cost V5 a 10x epoch slowdown: pyg_lib
+    silently missing, so NeighborLoader falls back to the Python sampler.
+    Also runs one tiny NeighborLoader batch end-to-end.
+    """
+    import torch
+
+    result: dict[str, Any] = {
+        "torch": torch.__version__,
+        "cuda_available": torch.cuda.is_available(),
+    }
+    try:
+        import torch_geometric
+        result["torch_geometric"] = torch_geometric.__version__
+        result["with_pyg_lib"] = bool(torch_geometric.typing.WITH_PYG_LIB)
+    except Exception as exc:  # noqa: BLE001 — report, don't crash the smoke
+        result["torch_geometric_error"] = repr(exc)
+        return result
+    try:
+        import pyg_lib  # type: ignore[import-not-found]
+
+        result["pyg_lib"] = getattr(pyg_lib, "__version__", "unknown")
+    except Exception as exc:  # noqa: BLE001
+        result["pyg_lib_error"] = repr(exc)
+
+    try:
+        from torch_geometric.data import Data
+        from torch_geometric.loader import NeighborLoader
+
+        n = 1000
+        edge_index = torch.randint(0, n, (2, 5000))
+        data = Data(
+            x=torch.arange(n),
+            edge_index=edge_index,
+            edge_attr=torch.randint(0, 10, (5000,)),
+            edge_time=torch.randint(0, 10_000, (5000,)),
+            edge_numeric=torch.rand(5000),
+            node_time=torch.randint(0, 10_000, (n,)),
+            num_nodes=n,
+        )
+        loader = NeighborLoader(data, num_neighbors=[5, 5], batch_size=32, input_nodes=torch.arange(64))
+        batch = next(iter(loader))
+        result["sampler_ok"] = int(batch.x.shape[0]) > 0
+    except Exception as exc:  # noqa: BLE001
+        result["sampler_error"] = repr(exc)
+
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -2577,17 +2790,12 @@ def _ddp_worker(
     dist.destroy_process_group()
 
 
-@scale_app.function(
-    image=gpu_image_v6,
-    gpu="H100:4",  # V6.1: 4x H100 (auto-upgraded to H200, 141GB each, 4.8TB/s bandwidth)
-    timeout=86400,  # 24h (Modal max)
-    volumes=VOLUMES,
-    memory=204800,  # 200GB RAM for graph structures
-)
-def train_tkg_jepa_v6(
+def _train_tkg_jepa_v6_impl(
     parquet_path: str = "/data/jcube_graph_v6.parquet",
     ontology_path: str = "/data/ontology_nodes.parquet",
     config_json: str | None = None,
+    *,
+    run_profile: str,
 ) -> TrainResult:
     """Train V6.1 Dense Temporal JEPA on the full TKG with DDP.
 
@@ -2600,7 +2808,10 @@ def train_tkg_jepa_v6(
     import torch.multiprocessing as mp
 
     print("=" * 60)
-    print("V6.1 Dense Temporal JEPA — DDP on 4x H100/H200")
+    if run_profile == "codebase":
+        print("V6.2 Dense Temporal JEPA — codebase profile on 1x H100")
+    else:
+        print("V6.1 Dense Temporal JEPA — DDP on 4x H100/H200")
     print("=" * 60)
 
     # Parse config
@@ -2608,6 +2819,11 @@ def train_tkg_jepa_v6(
         cfg = V6Config.from_json(config_json)
     else:
         cfg = V6Config()
+
+    if run_profile == "codebase":
+        cfg.use_ddp = False
+        cfg.num_gpus = 1
+        cfg.disable_warm_start = True
 
     cfg.parquet_path = parquet_path
     cfg.ontology_path = ontology_path
@@ -2649,6 +2865,46 @@ def train_tkg_jepa_v6(
     return result
 
 
+@scale_app.function(
+    image=gpu_image_v6,
+    gpu="H100:4",  # hospital-scale temporal graph default
+    timeout=86400,
+    volumes=VOLUMES,
+    memory=204800,
+)
+def train_tkg_jepa_v6(
+    parquet_path: str = "/data/jcube_graph_v6.parquet",
+    ontology_path: str = "/data/ontology_nodes.parquet",
+    config_json: str | None = None,
+) -> TrainResult:
+    return _train_tkg_jepa_v6_impl(
+        parquet_path=parquet_path,
+        ontology_path=ontology_path,
+        config_json=config_json,
+        run_profile="default",
+    )
+
+
+@scale_app.function(
+    image=gpu_image_v6,
+    gpu="H100",  # codebase-scale temporal graph profile
+    timeout=86400,
+    volumes=VOLUMES,
+    memory=131072,
+)
+def train_tkg_jepa_v6_codebase(
+    parquet_path: str = "/data/jcube_graph_v6.parquet",
+    ontology_path: str = "/data/ontology_nodes.parquet",
+    config_json: str | None = None,
+) -> TrainResult:
+    return _train_tkg_jepa_v6_impl(
+        parquet_path=parquet_path,
+        ontology_path=ontology_path,
+        config_json=config_json,
+        run_profile="codebase",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Local entrypoint
 # ---------------------------------------------------------------------------
@@ -2658,19 +2914,26 @@ def train_tkg_jepa_v6(
 def main(
     action: str = "full",
     catalog_path: str = "data/ai_friendly_catalog.json",
+    parquet_path: str = "/data/jcube_graph_v6.parquet",
+    ontology_path: str = "/data/ontology_nodes.parquet",
+    train_profile: str = "default",
     config: str = "",
 ) -> None:
     """V6 Dense Temporal JEPA pipeline (all heavy work on Modal).
 
     Actions:
+        smoke       -- Verify the training image (pyg_lib!) on a cheap GPU first
         materialize -- DuckDB -> Parquet edges + ontology texts + numeric values (Modal CPU)
-        train       -- Train V6 Dense Temporal JEPA (Modal GPU, A100-80GB)
+        train       -- Train V6 Dense Temporal JEPA (Modal GPU, H100:4 default)
         full        -- All steps end-to-end
 
     Usage:
+        modal run event_jepa_cube/scale_pipeline_v6.py --action smoke
         modal run --detach event_jepa_cube/scale_pipeline_v6.py --action full
         modal run --detach event_jepa_cube/scale_pipeline_v6.py --action train
         modal run event_jepa_cube/scale_pipeline_v6.py --action train --config '{"epochs":1,"gps_layers":2}'
+        modal run event_jepa_cube/scale_pipeline_v6.py --action train --train-profile codebase
+        modal run event_jepa_cube/scale_pipeline_v6.py --action train --parquet-path /data/leio-code/jcube_graph_v1.parquet --ontology-path /data/leio-code/ontology_nodes_v1.parquet
         modal run event_jepa_cube/scale_pipeline_v6.py --action materialize
 
     Prerequisites:
@@ -2694,6 +2957,22 @@ def main(
         config_json = base.to_json()
         print(f"Config overrides: {overrides}")
 
+    if action == "smoke":
+        print("=" * 60)
+        print("SMOKE: verifying training image on a cheap GPU")
+        print("=" * 60)
+        smoke = smoke_check_image.remote()
+        for k, v in smoke.items():
+            print(f"  {k}: {v}")
+        if not smoke.get("with_pyg_lib"):
+            print("\n  *** pyg_lib NOT active — NeighborLoader will fall back to the")
+            print("  *** Python sampler (the V5 10x slowdown). DO NOT launch training.")
+        elif not smoke.get("sampler_ok"):
+            print("\n  *** Sampler smoke failed — DO NOT launch training.")
+        else:
+            print("\n  Image OK — safe to launch training.")
+        return
+
     if action in ("materialize", "full"):
         print("=" * 60)
         print("STEP 1: Materialize TKG on Modal (V6 with numeric_value column)")
@@ -2702,7 +2981,11 @@ def main(
         with open(catalog_path) as f:
             catalog_json_str = f.read()
 
-        stats = materialize_remote.remote(catalog_json=catalog_json_str)
+        stats = materialize_remote.remote(
+            catalog_json=catalog_json_str,
+            output_path=parquet_path,
+            ontology_output_path=ontology_path,
+        )
         print(f"\n  {stats['n_edges']:,} edges ({stats['edge_file_mb']:.1f} MB)")
         print(f"  {stats['n_ontology_nodes']:,} ontology nodes ({stats['ontology_file_mb']:.1f} MB)")
 
@@ -2710,15 +2993,19 @@ def main(
             return
 
     if action in ("train", "full"):
+        ep_foundation = CURRICULUM_PHASES_V6[0].epoch_end
+        ep_total = CURRICULUM_PHASES_V6[-1].epoch_end
         print("\n" + "=" * 60)
-        print("STEP 2: Train V6 Dense Temporal JEPA on A100")
+        print("STEP 2: Train V6 Dense Temporal JEPA on Modal GPUs")
         print("  Loss: L_dense_lookahead + lambda * L_weak_sigreg")
-        print("  Curriculum: foundation (3 ep) -> temporal (7 ep)")
+        print(f"  Curriculum: foundation ({ep_foundation} ep) -> temporal ({ep_total - ep_foundation} ep)")
+        print(f"  Train profile: {train_profile}")
         print("=" * 60)
 
-        result = train_tkg_jepa_v6.remote(
-            parquet_path="/data/jcube_graph_v6.parquet",
-            ontology_path="/data/ontology_nodes.parquet",
+        train_fn = train_tkg_jepa_v6_codebase if train_profile == "codebase" else train_tkg_jepa_v6
+        result = train_fn.remote(
+            parquet_path=parquet_path,
+            ontology_path=ontology_path,
             config_json=config_json,
         )
 
@@ -2745,8 +3032,11 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="V6 Dense Temporal JEPA Pipeline")
-    parser.add_argument("--action", choices=["materialize", "train", "full"], default="full")
+    parser.add_argument("--action", choices=["smoke", "materialize", "train", "full"], default="full")
     parser.add_argument("--catalog", default="data/ai_friendly_catalog.json")
+    parser.add_argument("--parquet-path", default="/data/jcube_graph_v6.parquet")
+    parser.add_argument("--ontology-path", default="/data/ontology_nodes.parquet")
+    parser.add_argument("--train-profile", choices=["default", "codebase"], default="default")
     parser.add_argument("--config", default="", help="JSON config overrides")
     args = parser.parse_args()
 
@@ -2754,4 +3044,7 @@ if __name__ == "__main__":
         from event_jepa_cube.scale_pipeline import materialize
         materialize(catalog_path=args.catalog)
     else:
-        print("Training requires Modal. Use: modal run --detach event_jepa_cube/scale_pipeline_v6.py --action train")
+        print(
+            "This action requires Modal. Use: modal run event_jepa_cube/scale_pipeline_v6.py "
+            "--action smoke | --action train [--parquet-path ... --ontology-path ...]"
+        )

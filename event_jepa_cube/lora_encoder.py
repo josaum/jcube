@@ -130,7 +130,7 @@ class HiddenExtractor:
 
     def __init__(
         self,
-        model_name: str = "Qwen/Qwen3.5-0.8B",
+        model_name: str = "Qwen/Qwen3.6-0.8B",
         device: Optional[str] = None,
         max_length: int = 512,
     ) -> None:

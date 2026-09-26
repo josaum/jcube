@@ -37,8 +37,8 @@ gpu_image = (
         "transformers>=4.50",
         "peft>=0.14",
         "accelerate>=0.35",
-        "duckdb>=1.2.0",
-        "pyarrow>=18.0",
+        "duckdb>=1.5.2",
+        "pyarrow>=23.0.1",
         "huggingface-hub>=0.27",
         "numpy>=2.0",
         "bitsandbytes>=0.44",
@@ -58,7 +58,7 @@ def _get_hidden_dim(config) -> int:
         val = getattr(config, attr, None)
         if isinstance(val, int):
             return val
-    # Nested text_config (VLMs like Qwen3.5)
+    # Nested text_config (VLMs like Qwen3.6)
     text_cfg = getattr(config, "text_config", None)
     if text_cfg is not None:
         for attr in ("hidden_size", "d_model", "dim"):
@@ -81,7 +81,7 @@ def _get_hidden_dim(config) -> int:
 )
 def extract_hidden_states(
     texts: list[str],
-    model_name: str = "Qwen/Qwen3.5-0.8B",
+    model_name: str = "Qwen/Qwen3.6-0.8B",
     max_length: int = 512,
     batch_size: int = 64,
 ) -> list[list[float]]:
@@ -158,7 +158,7 @@ def train_on_gpu(
     flat_texts: list[str],
     flat_ts: list[float],
     entity_ranges: dict[str, list[int]],
-    model_name: str = "Qwen/Qwen3.5-0.8B",
+    model_name: str = "Qwen/Qwen3.6-0.8B",
     embedding_dim: int = 64,
     max_length: int = 512,
     total_steps: int = 2000,
@@ -488,7 +488,7 @@ def train_lora_jepa(
     flat_entity_types: list[str],
     entity_ranges: dict[str, list[int]],
     primary_entity_types: dict[str, str],
-    model_name: str = "Qwen/Qwen3.5-0.8B",
+    model_name: str = "Qwen/Qwen3.6-0.8B",
     embedding_dim: int = 64,
     max_length: int = 512,
     # LoRA config
@@ -1221,7 +1221,7 @@ def main(
     db_path: str = "data/aggregated_fixed_union.db",
     limit_entities: int = 50,
     limit_events: int = 300,
-    model_name: str = "Qwen/Qwen3.5-0.8B",
+    model_name: str = "Qwen/Qwen3.6-0.8B",
     total_steps: int = 5000,
     batch_size: int = 32,
     lora_epochs: int = 2,

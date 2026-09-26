@@ -4,8 +4,8 @@ Connects to one or more databases (DuckDB, PostgreSQL, MySQL, SQLite,
 Arrow Flight), builds an instant data warehouse via UNION ALL BY NAME,
 and runs the EventJEPA + EmbeddingCube pipeline automatically.
 
-Requires DuckDB. Install with: pip install event-jepa-cube[duckdb]
-For Arrow performance: pip install event-jepa-cube[duckdb-arrow]
+Requires DuckDB. Install with: pip install event-jepa-cube[twin]
+For Arrow performance: pip install event-jepa-cube[mycelia-arrow]
 """
 
 from __future__ import annotations
@@ -52,7 +52,7 @@ _DEFAULT_ENTITY_COLUMNS: dict[str, str] = {
 def _require_duckdb() -> None:
     if not _DUCKDB_AVAILABLE:
         raise ImportError(
-            "DuckDB is required for the DuckDB connector. Install with: pip install event-jepa-cube[duckdb]"
+            "DuckDB is required for the DuckDB connector. Install with: pip install event-jepa-cube[twin]"
         )
 
 

@@ -5,7 +5,7 @@ into a compressed Parquet of RDF triples (subject, predicate, object, time).
 
 Two node types:
     - ONTOLOGY (~136K): CID codes, TUSS procedures, medications, categories.
-      Encoded ONCE by Qwen3.5-0.8B → frozen embeddings. These are the "laws of physics"
+      Encoded ONCE by Qwen3.6-0.8B → frozen embeddings. These are the "laws of physics"
       that anchor medical meaning in the graph.
     - INSTANCE (~5M): Patients, admissions, invoices, beds.
       nn.Embedding(N, 64) — learned purely from graph topology via JEPA loss.
@@ -303,7 +303,7 @@ VOLUMES = {
 # CPU image for DuckDB materialization (no GPU needed)
 cpu_image = (
     modal.Image.debian_slim(python_version="3.12")
-    .pip_install("duckdb>=1.2.0", "pyarrow>=18.0")
+    .pip_install("duckdb>=1.5.2", "pyarrow>=23.0.1")
 )
 
 # GPU image for PyG training
@@ -317,7 +317,7 @@ gpu_image = (
     .pip_install(
         "torch>=2.6",
         "numpy>=2.0",
-        "pyarrow>=18.0",
+        "pyarrow>=23.0.1",
         "transformers>=4.50",
         "peft>=0.14",
         "accelerate>=0.35",
@@ -550,7 +550,7 @@ class QwenEncoder:
         from transformers import AutoModel, AutoTokenizer
 
         self.device = "cuda"
-        model_name = "Qwen/Qwen3.5-0.8B"
+        model_name = "Qwen/Qwen3.6-0.8B"
 
         self.tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
         if self.tokenizer.pad_token is None:
@@ -621,7 +621,7 @@ def train_tkg_jepa(
     reg_weight: float = 0.05,
     lookahead_steps: int = 5,
     lookahead_decay: float = 0.7,
-    qwen_model: str = "Qwen/Qwen3.5-0.8B",
+    qwen_model: str = "Qwen/Qwen3.6-0.8B",
 ) -> dict:
     """Train Graph-JEPA on the full 165M-edge TKG with hetero node init.
 

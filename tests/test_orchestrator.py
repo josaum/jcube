@@ -11,7 +11,9 @@ import pytest
 
 duckdb = pytest.importorskip("duckdb")
 
+from event_jepa_cube.materializer import EntityTimeline, MaterializationResult  # noqa: E402
 from event_jepa_cube.orchestrator import Pipeline, PipelineError  # noqa: E402
+from event_jepa_cube.sequence import EventSequence  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -83,6 +85,25 @@ class TestInit:
         assert p._cascade is not None
         p.shutdown()
 
+    def test_mycelia_scope_is_peeled_from_runtime_config(self, duckdb_config):
+        p = Pipeline(
+            duckdb_config=duckdb_config,
+            mycelia_config={
+                "base_url": "https://test.local",
+                "api_key": "key",
+                "tenant_id": "workspace",
+                "repo": "mycelia-workspace",
+                "rev": "43f5e23",
+            },
+        )
+        assert p._mycelia is not None
+        assert p._mycelia_scope == {
+            "tenant_id": "workspace",
+            "repo": "mycelia-workspace",
+            "rev": "43f5e23",
+        }
+        p.shutdown()
+
 
 # ---------------------------------------------------------------------------
 # Pipeline execution
@@ -105,10 +126,74 @@ class TestRun:
         mock_mycelia = MagicMock()
         mock_mycelia.sync_pipeline_results.return_value = {"synced": 2}
         populated_pipeline._mycelia = mock_mycelia
+        populated_pipeline._mycelia_scope = {
+            "tenant_id": "workspace",
+            "repo": "mycelia-workspace",
+            "rev": "43f5e23",
+        }
 
         result = populated_pipeline.run(sync_to_mycelia=True)
         assert result["mycelia_sync"] == {"synced": 2}
-        mock_mycelia.sync_pipeline_results.assert_called_once()
+        mock_mycelia.sync_pipeline_results.assert_called_once_with(
+            result,
+            representations_collection="event_sequences_representations",
+            predictions_collection="event_sequences_predictions",
+            tenant_id="workspace",
+            repo="mycelia-workspace",
+            rev="43f5e23",
+        )
+
+    def test_run_with_materialization_result_uses_rich_mycelia_payload(self, populated_pipeline):
+        materialized = MaterializationResult(
+            entity_type="INTERNACAO",
+            tables_scanned=2,
+            entities_found=1,
+            total_events=2,
+            embedding_dim=3,
+            timelines={
+                "internacao-1": EntityTimeline(
+                    entity_id="internacao-1",
+                    entity_type="INTERNACAO",
+                    sequence=EventSequence(
+                        embeddings=[[0.1, 0.2, 0.3], [0.3, 0.2, 0.1]],
+                        timestamps=[1.0, 2.0],
+                        modality="db_row",
+                    ),
+                    source_tables=["agg_tb_capta_internacao"],
+                    event_count=2,
+                    time_span_days=1.0,
+                )
+            },
+            representations={"internacao-1": [0.9, 0.1, 0.0]},
+            patterns={"internacao-1": [0]},
+            predictions={"internacao-1": [[0.8, 0.2, 0.0]]},
+        )
+
+        populated_pipeline._connector.run_pipeline = MagicMock(return_value=materialized)
+        mock_mycelia = MagicMock()
+        mock_mycelia.sync_pipeline_results.return_value = {"synced": 1}
+        populated_pipeline._mycelia = mock_mycelia
+        populated_pipeline._mycelia_scope = {
+            "tenant_id": "workspace",
+            "repo": "mycelia-workspace",
+            "rev": "43f5e23",
+        }
+
+        result = populated_pipeline.run(sync_to_mycelia=True)
+
+        assert result["entity_type"] == "INTERNACAO"
+        assert result["entities_found"] == 1
+        assert result["mycelia_sync"] == {"synced": 1}
+
+        sync_payload = mock_mycelia.sync_pipeline_results.call_args.args[0]
+        assert sync_payload["scope"] == {
+            "tenant_id": "workspace",
+            "repo": "mycelia-workspace",
+            "rev": "43f5e23",
+        }
+        assert sync_payload["representations"]["internacao-1"] == [0.9, 0.1, 0.0]
+        assert sync_payload["representation_metadata"]["internacao-1"]["entity_type"] == "INTERNACAO"
+        assert sync_payload["prediction_metadata"]["internacao-1_step_1"]["step"] == 1
 
 
 # ---------------------------------------------------------------------------

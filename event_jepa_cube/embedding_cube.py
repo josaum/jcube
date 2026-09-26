@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Iterable
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from . import numpy_ops as npo
 from .registry import get_model
@@ -31,12 +31,12 @@ class EmbeddingCube:
     """
 
     def __init__(self) -> None:
-        self.entities: Dict[str, Entity] = {}
-        self.models: Dict[str, Any] = {}
+        self.entities: dict[str, Entity] = {}
+        self.models: dict[str, Any] = {}
         # Norm cache: {(entity_id, modality): norm_value}
-        self._norm_cache: Dict[tuple[str, str], float] = {}
+        self._norm_cache: dict[tuple[str, str], float] = {}
         # Numpy embedding cache: {(entity_id, modality): ndarray}
-        self._array_cache: Dict[tuple[str, str], Any] = {}
+        self._array_cache: dict[tuple[str, str], Any] = {}
 
     def _invalidate_cache(self, entity_id: str) -> None:
         """Remove cached data for an entity."""
@@ -71,7 +71,7 @@ class EmbeddingCube:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _cosine_similarity(a: List[float], b: List[float]) -> float:
+    def _cosine_similarity(a: list[float], b: list[float]) -> float:
         """Compute cosine similarity between two vectors."""
         return npo.cosine_similarity(a, b)
 
@@ -80,8 +80,8 @@ class EmbeddingCube:
         id_a: str,
         id_b: str,
         modality: str,
-        emb_a: List[float],
-        emb_b: List[float],
+        emb_a: list[float],
+        emb_b: list[float],
     ) -> float:
         """Cosine similarity using cached norms."""
         norm_a = self._norm_cache.get((id_a, modality))
@@ -120,13 +120,13 @@ class EmbeddingCube:
         self,
         entity_ids: Iterable[str],
         threshold: float = 0.5,
-    ) -> Dict[str, List[str]]:
+    ) -> dict[str, list[str]]:
         """Discover relationships using cosine similarity.
 
         Uses cached norms and batch numpy operations when available.
         """
         id_list = list(entity_ids)
-        relationships: Dict[str, List[str]] = {}
+        relationships: dict[str, list[str]] = {}
 
         # Collect all entity ids for batch processing
         all_entity_ids = list(self.entities.keys())
@@ -136,7 +136,7 @@ class EmbeddingCube:
             if entity_a is None:
                 continue
 
-            related: List[str] = []
+            related: list[str] = []
             cat_a = entity_a.hierarchy_info.get("category")
 
             for id_b in all_entity_ids:
@@ -174,7 +174,7 @@ class EmbeddingCube:
         self,
         entity_ids: Iterable[str],
         threshold: float = 0.5,
-    ) -> Dict[str, List[str]]:
+    ) -> dict[str, list[str]]:
         """Batch relationship discovery using matrix operations.
 
         Groups entities by shared modalities and computes similarity
@@ -193,7 +193,7 @@ class EmbeddingCube:
             if entity:
                 all_modalities.update(entity.embeddings.keys())
 
-        relationships: Dict[str, List[str]] = {}
+        relationships: dict[str, list[str]] = {}
 
         for id_a in id_list:
             entity_a = self.entities.get(id_a)
@@ -203,8 +203,8 @@ class EmbeddingCube:
             cat_a = entity_a.hierarchy_info.get("category")
             # For each modality entity_a has, batch compute similarity
             # against all other entities that share that modality
-            per_entity_sims: Dict[str, list[float]] = {}
-            per_entity_counts: Dict[str, int] = {}
+            per_entity_sims: dict[str, list[float]] = {}
+            per_entity_counts: dict[str, int] = {}
 
             for mod in entity_a.embeddings:
                 vec_a = entity_a.embeddings[mod]
@@ -232,7 +232,7 @@ class EmbeddingCube:
                     per_entity_sims[id_b].append(sim)
                     per_entity_counts[id_b] += 1
 
-            related: List[str] = []
+            related: list[str] = []
             for id_b, sims in per_entity_sims.items():
                 avg_sim = sum(sims) / len(sims)
                 cat_b = self.entities[id_b].hierarchy_info.get("category")

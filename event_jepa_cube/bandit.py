@@ -27,13 +27,25 @@ import json
 import logging
 import urllib.error
 import urllib.request
-from typing import Any
+from typing import Any, cast
 
 logger = logging.getLogger(__name__)
 
 
 class BanditError(Exception):
     """Error from the Mycelia bandit API."""
+
+
+def _expect_dict(value: Any, context: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise BanditError(f"{context} returned {type(value).__name__}, expected dict")
+    return cast(dict[str, Any], value)
+
+
+def _expect_list(value: Any, context: str) -> list[Any]:
+    if not isinstance(value, list):
+        raise BanditError(f"{context} returned {type(value).__name__}, expected list")
+    return cast(list[Any], value)
 
 
 class BanditClient:
@@ -136,7 +148,7 @@ class BanditClient:
         body: dict[str, Any] = {"name": name, "strategy": strategy, **kwargs}
         result = self._post("/v2/bandits", body)
         logger.info("Created bandit policy %r (strategy=%s)", name, strategy)
-        return result
+        return _expect_dict(result, "create_policy")
 
     def get_policy(self, name: str) -> dict[str, Any]:
         """Get policy details.
@@ -147,7 +159,7 @@ class BanditClient:
         Returns:
             Policy details dict.
         """
-        return self._get(f"/v2/bandits/{name}")
+        return _expect_dict(self._get(f"/v2/bandits/{name}"), "get_policy")
 
     def list_policies(self) -> list[Any]:
         """List all bandit policies.
@@ -155,7 +167,7 @@ class BanditClient:
         Returns:
             List of policy summary dicts.
         """
-        return self._get("/v2/bandits")
+        return _expect_list(self._get("/v2/bandits"), "list_policies")
 
     def delete_policy(self, name: str) -> None:
         """Delete a policy and all its data.
@@ -184,7 +196,7 @@ class BanditClient:
         Returns:
             Result dict with insertion details.
         """
-        return self._post(f"/v2/bandits/{policy}/arms", {"arms": arms})
+        return _expect_dict(self._post(f"/v2/bandits/{policy}/arms", {"arms": arms}), "add_arms")
 
     def refresh_arms(self, policy: str) -> dict[str, Any]:
         """Idempotently re-embed and upsert arm semantics.
@@ -197,7 +209,7 @@ class BanditClient:
         Returns:
             Refresh result dict.
         """
-        return self._post(f"/v2/bandits/{policy}/arms/refresh")
+        return _expect_dict(self._post(f"/v2/bandits/{policy}/arms/refresh"), "refresh_arms")
 
     def remove_arm(self, policy: str, arm_id: str) -> None:
         """Remove an arm from a policy.
@@ -226,7 +238,7 @@ class BanditClient:
         """
         body: dict[str, Any] = {"contexts": contexts, "k": k}
         result = self._post(f"/v2/bandits/{policy}/select", body)
-        return result.get("selections", result) if isinstance(result, dict) else result
+        return _expect_list(result.get("selections", result) if isinstance(result, dict) else result, "select")
 
     def reward(self, policy: str, arm_id: str, context: list[float], reward: float) -> dict[str, Any]:
         """Record reward feedback for an arm-context interaction.
@@ -245,7 +257,7 @@ class BanditClient:
             "context": context,
             "reward": reward,
         }
-        return self._post(f"/v2/bandits/{policy}/reward", body)
+        return _expect_dict(self._post(f"/v2/bandits/{policy}/reward", body), "reward")
 
     def diagnostics(self, policy: str) -> dict[str, Any]:
         """Get policy diagnostics, arm statistics, and reward history.
@@ -256,7 +268,7 @@ class BanditClient:
         Returns:
             Dict with ``stats``, ``arm_details``, ``reward_history``, etc.
         """
-        return self._get(f"/v2/bandits/{policy}/diagnostics")
+        return _expect_dict(self._get(f"/v2/bandits/{policy}/diagnostics"), "diagnostics")
 
     # ------------------------------------------------------------------
     # Offline training
@@ -286,8 +298,9 @@ class BanditClient:
             "importance_sampling": importance_sampling,
         }
         result = self._post(f"/v2/bandits/{policy}/train", body)
-        logger.info("Started offline training for policy %r (task=%s)", policy, result.get("task_id"))
-        return result
+        result_dict = _expect_dict(result, "train_offline")
+        logger.info("Started offline training for policy %r (task=%s)", policy, result_dict.get("task_id"))
+        return result_dict
 
 
 class CascadeBandit:

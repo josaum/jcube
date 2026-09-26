@@ -8,7 +8,7 @@ data_volume = modal.Volume.from_name("jcube-data", create_if_missing=True)
 
 image = (
     modal.Image.debian_slim(python_version="3.12")
-    .pip_install("torch>=2.6", "numpy>=2.0", "pyarrow>=18.0", "duckdb>=1.0.0",
+    .pip_install("torch>=2.6", "numpy>=2.0", "pyarrow>=23.0.1", "duckdb>=1.5.2",
                  "scikit-learn>=1.4", "lightgbm>=4.0")
 )
 

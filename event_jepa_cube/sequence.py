@@ -2,15 +2,15 @@
 
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Dict, List
+from typing import Any
 
 
 @dataclass
 class EventSequence:
     """A sequence of event embeddings with timestamps."""
 
-    embeddings: List[List[float]]
-    timestamps: List[float]
+    embeddings: list[list[float]]
+    timestamps: list[float]
     modality: str = "text"
 
     def __post_init__(self) -> None:
@@ -22,6 +22,6 @@ class EventSequence:
 class Entity:
     """Represents a multi-semantic entity for the Embedding Cube."""
 
-    embeddings: Dict[str, List[float]]
-    hierarchy_info: Dict[str, Any] = field(default_factory=dict)
+    embeddings: dict[str, list[float]]
+    hierarchy_info: dict[str, Any] = field(default_factory=dict)
     id: str = field(default_factory=lambda: str(uuid.uuid4()))

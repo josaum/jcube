@@ -15,7 +15,7 @@ import math
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 try:
     import duckdb
@@ -147,7 +147,6 @@ def _classify_domain(table_name: str) -> tuple[str, str]:
     start = 1 if len(parts) > 1 and parts[0] == "tb" else 0
     if start < len(parts):
         key = parts[start]
-        desc = _DOMAIN_DESCRIPTIONS.get(key, f"{key} domain tables")
         prefix = f"agg_tb_{key}"
         return key, prefix
     return "other", table_name
@@ -172,6 +171,29 @@ def _size_category(row_count: int) -> str:
 _ID_PATTERN = re.compile(r"^(ID_CD_|id_cd_|ID_|id_)", re.IGNORECASE)
 _TS_TYPES = {"TIMESTAMP", "TIMESTAMPTZ", "TIMESTAMP WITH TIME ZONE", "DATE", "DATETIME"}
 _NUMERIC_TYPES = {"BIGINT", "INTEGER", "SMALLINT", "TINYINT", "FLOAT", "DOUBLE", "DECIMAL", "HUGEINT"}
+_READ_ONLY_SQL_PREFIX = re.compile(r"^\s*(SELECT|WITH|SHOW|DESCRIBE|DESC|EXPLAIN)\b", re.IGNORECASE)
+_READ_ONLY_SQL_FORBIDDEN = re.compile(
+    r"\b(INSERT|UPDATE|DELETE|ALTER|DROP|CREATE|TRUNCATE|COPY|CALL|ATTACH|DETACH|EXPORT|IMPORT|LOAD|INSTALL|MERGE|REPLACE|VACUUM)\b",
+    re.IGNORECASE,
+)
+
+
+def validate_read_only_sql(sql: str) -> str:
+    """Validate that *sql* is a single read-only statement."""
+    normalized = sql.strip()
+    if not normalized:
+        raise ValueError("SQL query must not be empty")
+    if "--" in normalized or "/*" in normalized or "*/" in normalized:
+        raise ValueError("SQL comments are not allowed")
+
+    without_trailing_semicolon = normalized.rstrip(";").strip()
+    if ";" in without_trailing_semicolon:
+        raise ValueError("Only a single SQL statement is allowed")
+    if not _READ_ONLY_SQL_PREFIX.match(without_trailing_semicolon):
+        raise ValueError("Only read-only SELECT/SHOW/DESCRIBE/EXPLAIN queries are allowed")
+    if _READ_ONLY_SQL_FORBIDDEN.search(without_trailing_semicolon):
+        raise ValueError("SQL query contains write or schema-changing operations")
+    return without_trailing_semicolon
 
 
 class DigitalTwin:
@@ -214,15 +236,15 @@ class DigitalTwin:
         arrow = self._con().execute(
             "SELECT table_name FROM information_schema.tables "
             "WHERE table_schema = 'main' ORDER BY table_name"
-        ).fetch_arrow_table()
-        return arrow.column("table_name").to_pylist()
+        ).to_arrow_table()
+        return cast(list[str], arrow.column("table_name").to_pylist())
 
     def _describe_table(self, table: str) -> list[dict[str, Any]]:
         arrow = self._con().execute(
             "SELECT column_name, data_type, is_nullable "
             f'FROM information_schema.columns WHERE table_name = \'{table}\' '
             "ORDER BY ordinal_position"
-        ).fetch_arrow_table()
+        ).to_arrow_table()
         return [
             {
                 "name": arrow.column("column_name")[i].as_py(),
@@ -233,7 +255,10 @@ class DigitalTwin:
         ]
 
     def _row_count(self, table: str) -> int:
-        return self._con().execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]  # type: ignore[index]
+        row = self._con().execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()
+        if not row:
+            return 0
+        return int(row[0])
 
     def _profile_column(self, table: str, col_name: str, dtype: str, total_rows: int) -> dict[str, Any]:
         """Profile a single column using Arrow for data transfer."""
@@ -281,7 +306,7 @@ class DigitalTwin:
             arrow = con.execute(
                 f"SELECT DISTINCT {safe_col} FROM {safe_tbl} "
                 f"WHERE {safe_col} IS NOT NULL LIMIT 5"
-            ).fetch_arrow_table()
+            ).to_arrow_table()
             stats["sample_values"] = [_serialize(v) for v in arrow.column(0).to_pylist()]
         except Exception:
             stats["sample_values"] = []
@@ -298,7 +323,7 @@ class DigitalTwin:
             try:
                 arrow = con.execute(
                     f'SELECT DISTINCT source_db FROM "{t}" WHERE source_db IS NOT NULL LIMIT 100'
-                ).fetch_arrow_table()
+                ).to_arrow_table()
                 sources.update(arrow.column(0).to_pylist())
             except Exception:
                 continue
@@ -473,7 +498,7 @@ class DigitalTwin:
             try:
                 arrow = self._con().execute(
                     f'SELECT DISTINCT source_db FROM "{tname}" WHERE source_db IS NOT NULL LIMIT 100'
-                ).fetch_arrow_table()
+                ).to_arrow_table()
                 tp.source_databases = arrow.column(0).to_pylist()
             except Exception:
                 tp.source_databases = []
@@ -525,21 +550,23 @@ class DigitalTwin:
 
     # -- query helpers (post-build) -----------------------------------------
 
-    def query_arrow(self, sql: str) -> Any:
+    def query_arrow(self, sql: str, *, validate_read_only_query: bool = False) -> Any:
         """Execute arbitrary SQL and return an Arrow table."""
-        return self._con().execute(sql).fetch_arrow_table()
+        if validate_read_only_query:
+            sql = validate_read_only_sql(sql)
+        return self._con().execute(sql).to_arrow_table()
 
     def table_sample(self, table: str, limit: int = 10) -> list[dict[str, Any]]:
         """Return sample rows from a table as list of dicts."""
-        arrow = self._con().execute(f'SELECT * FROM "{table}" LIMIT {limit}').fetch_arrow_table()
-        return arrow.to_pylist()
+        arrow = self._con().execute(f'SELECT * FROM "{table}" LIMIT {limit}').to_arrow_table()
+        return cast(list[dict[str, Any]], arrow.to_pylist())
 
     def table_arrow(self, table: str, *, limit: int | None = None) -> Any:
         """Return a table as an Arrow Table (zero-copy from DuckDB)."""
         sql = f'SELECT * FROM "{table}"'
         if limit:
             sql += f" LIMIT {limit}"
-        return self._con().execute(sql).fetch_arrow_table()
+        return self._con().execute(sql).to_arrow_table()
 
 
 # ---------------------------------------------------------------------------

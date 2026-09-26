@@ -1,9 +1,9 @@
 """Simple registries for embeddings and models."""
 
-from typing import Callable, Dict
+from typing import Callable
 
-_embedding_registry: Dict[str, Callable] = {}
-_model_registry: Dict[str, Callable] = {}
+_embedding_registry: dict[str, Callable] = {}
+_model_registry: dict[str, Callable] = {}
 
 
 def register_embedding_type(name: str) -> Callable[[Callable], Callable]:

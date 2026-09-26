@@ -4,11 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "event-jepa-cube"
-version = "0.1.0"
+version = "0.3.0"
 description = "Event sequence processing and multi-semantic entity relationships using JEPA architecture"
 readme = "README.md"
 license = "MIT"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 authors = [
     {name = "Dionisio Chiuratto Agourakis"}
 ]
@@ -16,7 +16,6 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -27,13 +26,14 @@ dependencies = []
 [project.optional-dependencies]
 numpy = ["numpy>=1.24"]
 torch = ["torch>=2.0"]
-duckdb = ["duckdb>=1.0.0"]
-duckdb-arrow = ["duckdb>=1.0.0", "pyarrow>=14.0"]
-mycelia-arrow = ["pyarrow>=14.0"]
-twin = ["duckdb>=1.0.0", "pyarrow>=14.0", "fastapi>=0.100", "uvicorn>=0.20"]
-train = ["torch>=2.0", "transformers>=4.40", "peft>=0.10", "accelerate>=0.25", "duckdb>=1.0.0", "pyarrow>=14.0"]
+# Canonical Arrow extra. The redundant `duckdb` / `duckdb-arrow` extras were
+# removed; DuckDB is still pulled transitively by `twin` and `train`, which
+# genuinely open `duckdb.connect` against local `.duckdb` warehouse files.
+mycelia-arrow = ["pyarrow>=23.0.1"]
+twin = ["duckdb>=1.5.2", "pyarrow>=23.0.1", "fastapi>=0.100", "uvicorn>=0.20"]
+train = ["torch>=2.0", "transformers>=4.40", "peft>=0.10", "accelerate>=0.25", "duckdb>=1.5.2", "pyarrow>=23.0.1"]
 dev = ["pytest>=7.0", "pytest-cov", "ruff", "mypy"]
-all = ["event-jepa-cube[numpy,torch,duckdb,duckdb-arrow,mycelia-arrow,twin,train,dev]"]
+all = ["event-jepa-cube[numpy,torch,mycelia-arrow,twin,train,dev]"]
 
 [project.scripts]
 digital-twin = "event_jepa_cube.twin_api:main"
@@ -42,6 +42,10 @@ digital-twin = "event_jepa_cube.twin_api:main"
 Homepage = "https://github.com/josaum/jcube"
 Repository = "https://github.com/josaum/jcube"
 
+[tool.setuptools.packages.find]
+include = ["event_jepa_cube*"]
+exclude = ["reports*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-v --tb=short"
@@ -49,12 +53,67 @@ addopts = "-v --tb=short"
 [tool.ruff]
 line-length = 120
 target-version = "py39"
+extend-exclude = [
+    "reports",
+    "event_jepa_cube/exploit_twin.py",
+    "event_jepa_cube/graph_loader.py",
+    "event_jepa_cube/jepa_trainer.py",
+    "event_jepa_cube/lora_encoder.py",
+    "event_jepa_cube/modal_gpu.py",
+    "event_jepa_cube/run_probe.py",
+    "event_jepa_cube/run_probe_hospital.py",
+    "event_jepa_cube/run_probe_sweep.py",
+    "event_jepa_cube/scale_pipeline.py",
+    "event_jepa_cube/scale_pipeline_v5.py",
+    "event_jepa_cube/scale_pipeline_v6.py",
+    "event_jepa_cube/verify_v62_epoch1.py",
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
 
+[tool.ruff.lint.per-file-ignores]
+"event_jepa_cube/__init__.py" = ["E402"]
+
 [tool.mypy]
-python_version = "3.9"
+python_version = "3.10"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true
+follow_imports = "silent"
+exclude = '''(?x)(
+    ^reports/
+  | ^event_jepa_cube/exploit_twin\.py$
+  | ^event_jepa_cube/graph_loader\.py$
+  | ^event_jepa_cube/jepa_trainer\.py$
+  | ^event_jepa_cube/lora_encoder\.py$
+  | ^event_jepa_cube/modal_gpu\.py$
+  | ^event_jepa_cube/run_probe(?:_hospital|_sweep)?\.py$
+  | ^event_jepa_cube/scale_pipeline(?:_v5|_v6)?\.py$
+  | ^event_jepa_cube/verify_v62_epoch1\.py$
+)'''
+
+[[tool.mypy.overrides]]
+module = [
+    "modal",
+    "mycelia.flight.contracts",
+    "pyarrow",
+    "pyarrow.*",
+    "scipy.*",
+    "sklearn",
+    "sklearn.*",
+    "lightgbm",
+    "torch",
+    "torch.*",
+    "torch_geometric",
+    "torch_geometric.*",
+]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = [
+    "event_jepa_cube.numpy_ops",
+    "event_jepa_cube.predictors",
+    "event_jepa_cube.regularizers",
+]
+ignore_errors = true

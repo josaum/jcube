@@ -10,7 +10,7 @@ VOLUMES = {"/cache": jepa_cache, "/data": data_vol}
 
 image = (
     modal.Image.debian_slim(python_version="3.12")
-    .pip_install("torch>=2.2", "numpy>=1.26", "duckdb>=1.2.0", "pyarrow>=18.0", "scikit-learn>=1.4")
+    .pip_install("torch>=2.2", "numpy>=1.26", "duckdb>=1.5.2", "pyarrow>=23.0.1", "scikit-learn>=1.4")
 )
 
 @app.function(image=image, volumes=VOLUMES, memory=65536, timeout=900)

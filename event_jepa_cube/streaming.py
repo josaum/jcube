@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import math
 from collections import deque
-from typing import Optional
+from typing import cast
 
 from . import numpy_ops as npo
 from .sequence import EventSequence
@@ -185,22 +185,22 @@ class StreamingJEPA:
     @classmethod
     def from_snapshot(cls, snapshot: dict[str, object]) -> StreamingJEPA:
         """Restore from a previously captured snapshot."""
-        embedding_dim = int(snapshot["embedding_dim"])  # type: ignore[arg-type]
-        alpha = float(snapshot["alpha"])  # type: ignore[arg-type]
+        embedding_dim = int(cast(int | float | str, snapshot["embedding_dim"]))
+        alpha = float(cast(int | float | str, snapshot["alpha"]))
         window_size_raw = snapshot["window_size"]
-        window_size = int(window_size_raw) if window_size_raw is not None else None  # type: ignore[arg-type]
+        window_size = int(cast(int | float | str, window_size_raw)) if window_size_raw is not None else None
 
         instance = cls(embedding_dim=embedding_dim, alpha=alpha, window_size=window_size)
-        instance._representation = list(snapshot["representation"])  # type: ignore[arg-type]
-        instance._count = int(snapshot["count"])  # type: ignore[arg-type]
+        instance._representation = list(cast(list[float], snapshot["representation"]))
+        instance._count = int(cast(int | float | str, snapshot["count"]))
         ts_raw = snapshot["last_timestamp"]
-        instance._last_timestamp = float(ts_raw) if ts_raw is not None else None  # type: ignore[arg-type]
-        instance._running_mean = list(snapshot["running_mean"])  # type: ignore[arg-type]
-        instance._running_m2 = list(snapshot["running_m2"])  # type: ignore[arg-type]
+        instance._last_timestamp = float(cast(int | float | str, ts_raw)) if ts_raw is not None else None
+        instance._running_mean = list(cast(list[float], snapshot["running_mean"]))
+        instance._running_m2 = list(cast(list[float], snapshot["running_m2"]))
 
         maxlen = window_size if window_size is not None else None
-        recent_embs: list[list[float]] = snapshot["recent_embeddings"]  # type: ignore[assignment]
-        recent_ts: list[float] = snapshot["recent_timestamps"]  # type: ignore[assignment]
+        recent_embs = cast(list[list[float]], snapshot["recent_embeddings"])
+        recent_ts = cast(list[float], snapshot["recent_timestamps"])
         instance._recent_embeddings = deque([list(e) for e in recent_embs], maxlen=maxlen)
         instance._recent_timestamps = deque(list(recent_ts), maxlen=maxlen)
 

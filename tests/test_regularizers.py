@@ -7,7 +7,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from event_jepa_cube.regularizers import RDMReg, SIGReg, WeakSIGReg
+from event_jepa_cube.regularizers import NormReg, RDMReg, SIGReg, WeakSIGReg
 
 
 class TestSIGReg:
@@ -93,3 +93,48 @@ class TestRDMReg:
         zero_fraction = (rectified == 0).float().mean().item()
         assert zero_fraction > 0.3  # some zeros should exist
         assert loss.item() >= 0.0
+
+
+class TestNormReg:
+    """Tests for NormReg regularizer.
+
+    NormReg exists to close the representation-explosion escape in symmetric
+    (bidirectional) prediction: inflating norms must cost more than learning
+    structure, while well-scaled Gaussian embeddings stay near-free.
+    """
+
+    def test_normreg_gaussian_low_exploded_high(self):
+        torch.manual_seed(42)
+        reg = NormReg()
+        gaussian_emb = torch.randn(256, 32)
+        exploded_emb = gaussian_emb * 10.0
+
+        loss_gaussian = reg.compute_loss(gaussian_emb)
+        loss_exploded = reg.compute_loss(exploded_emb)
+
+        # Norm inflation must be penalized far more than unit-scale embeddings,
+        # otherwise NormReg cannot prevent representation explosion.
+        assert loss_exploded.item() > loss_gaussian.item() * 100
+
+    def test_normreg_collapsed_to_zero_penalized(self):
+        # Collapse-to-zero (all norms 0) is the other trivial escape; it must
+        # not be free either: loss -> target_scale^2.
+        reg = NormReg()
+        zero_emb = torch.zeros(64, 16)
+        loss = reg.compute_loss(zero_emb)
+        assert abs(loss.item() - 1.0) < 1e-6
+
+    def test_normreg_output_scalar_and_grad(self):
+        torch.manual_seed(1)
+        reg = NormReg()
+        emb = torch.randn(32, 8, requires_grad=True)
+        loss = reg.compute_loss(emb)
+        assert loss.dim() == 0
+        loss.backward()
+        assert emb.grad is not None
+
+    def test_normreg_target_scale_validation(self):
+        with pytest.raises(ValueError, match="target_scale"):
+            NormReg(target_scale=0.0)
+        with pytest.raises(ValueError, match="target_scale"):
+            NormReg(target_scale=-1.0)
