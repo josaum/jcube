@@ -5,8 +5,10 @@
 Event-JEPA-Cube addresses fundamental limitations of standard Transformer architectures — fixed context windows, quadratic memory scaling, and single-modality bias — by providing hierarchical temporal processing, multi-modal embedding support, and mathematically grounded regularization within a unified entity representation system.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
-[![Tests](https://img.shields.io/badge/tests-34%20passed-brightgreen.svg)]()
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![Tests](https://img.shields.io/badge/tests-394%20passed-brightgreen.svg)]()
+
+All code lives under the sovereign namespace: `https://github.com/josaum/jcube`.
 
 ---
 
