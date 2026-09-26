@@ -38,7 +38,12 @@ import time
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Any, TypedDict, cast
 
-import modal
+try:
+    import modal
+except ImportError:
+    from event_jepa_cube.train_local import _install_modal_stub
+    _install_modal_stub()
+    import modal
 
 if TYPE_CHECKING:
     import torch
