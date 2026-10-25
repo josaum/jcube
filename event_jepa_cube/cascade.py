@@ -26,8 +26,9 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 
 from .duckdb_connector import DuckDBConnector, _require_duckdb, _validate_identifier
 from .triggers import AlertRule, StopHandle, TriggerEngine

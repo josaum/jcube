@@ -179,8 +179,7 @@ class Pipeline:
 
         tbl_list = tables or [self._source_table]
         source_configs = [
-            {"name": name, "connection_string": connection_string}
-            for name, connection_string in sources.items()
+            {"name": name, "connection_string": connection_string} for name, connection_string in sources.items()
         ]
         return self._connector.run_from_sources(source_configs, tbl_list)
 

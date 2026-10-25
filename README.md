@@ -33,8 +33,8 @@ pip install -e .
 # With PyTorch for JEPA regularizers
 pip install -e ".[torch]"
 
-# Development tools (pytest, ruff, mypy)
-pip install -e ".[dev]"
+# Complete test and development dependencies
+pip install -e ".[test]"
 
 # Everything
 pip install -e ".[all]"
@@ -49,9 +49,7 @@ from event_jepa_cube import EventJEPA, EventSequence
 
 # 1. Create an event sequence with embeddings and timestamps
 sequence = EventSequence(
-    embeddings=[[0.1, 0.2, 0.3], [0.0, 0.1, 0.0], [0.2, 0.2, 0.2]],
-    timestamps=[1.0, 2.0, 3.0],
-    modality="text"
+    embeddings=[[0.1, 0.2, 0.3], [0.0, 0.1, 0.0], [0.2, 0.2, 0.2]], timestamps=[1.0, 2.0, 3.0], modality="text"
 )
 
 # 2. Process with hierarchical temporal aggregation
@@ -65,8 +63,8 @@ patterns = processor.detect_patterns(representation)
 predictions = processor.predict_next(sequence, num_steps=3)
 
 print("Representation:", representation)  # Temporally-weighted aggregate
-print("Patterns:", patterns)              # Indices of salient dimensions
-print("Predictions:", predictions)        # Next predicted embeddings
+print("Patterns:", patterns)  # Indices of salient dimensions
+print("Predictions:", predictions)  # Next predicted embeddings
 ```
 
 Run the included example:
@@ -89,20 +87,20 @@ from event_jepa_cube import EventJEPA, EventSequence
 # Simulated user journey: browsing, idle, then purchase
 sequence = EventSequence(
     embeddings=[
-        [0.8, 0.1, 0.0],   # browse product A
-        [0.7, 0.2, 0.1],   # browse product B
-        [0.1, 0.0, 0.0],   # idle
-        [0.2, 0.9, 0.8],   # add to cart
-        [0.1, 0.8, 0.9],   # purchase
+        [0.8, 0.1, 0.0],  # browse product A
+        [0.7, 0.2, 0.1],  # browse product B
+        [0.1, 0.0, 0.0],  # idle
+        [0.2, 0.9, 0.8],  # add to cart
+        [0.1, 0.8, 0.9],  # purchase
     ],
     timestamps=[1.0, 2.0, 50.0, 51.0, 52.0],  # note the irregular gap
-    modality="behavior"
+    modality="behavior",
 )
 
 processor = EventJEPA(
     embedding_dim=3,
-    num_levels=2,              # 2 hierarchical levels
-    temporal_resolution="adaptive"  # split at natural timestamp gaps
+    num_levels=2,  # 2 hierarchical levels
+    temporal_resolution="adaptive",  # split at natural timestamp gaps
 )
 
 # Process: groups [browse, browse] and [idle, cart, purchase] into
@@ -135,28 +133,28 @@ from event_jepa_cube import EmbeddingCube, Entity
 # Create entities with multi-modal embeddings
 laptop = Entity(
     embeddings={
-        "text": [0.9, 0.1, 0.0, 0.2],     # from product description
-        "image": [0.3, 0.8, 0.1, 0.0],     # from product photo
+        "text": [0.9, 0.1, 0.0, 0.2],  # from product description
+        "image": [0.3, 0.8, 0.1, 0.0],  # from product photo
         "behavior": [0.5, 0.5, 0.7, 0.1],  # from purchase patterns
     },
-    hierarchy_info={"category": "electronics", "subcategory": "laptops"}
+    hierarchy_info={"category": "electronics", "subcategory": "laptops"},
 )
 
 phone = Entity(
     embeddings={
         "text": [0.85, 0.15, 0.05, 0.18],  # similar text embedding
-        "image": [0.2, 0.7, 0.2, 0.1],     # somewhat similar image
-        "behavior": [0.6, 0.4, 0.8, 0.05], # similar purchase pattern
+        "image": [0.2, 0.7, 0.2, 0.1],  # somewhat similar image
+        "behavior": [0.6, 0.4, 0.8, 0.05],  # similar purchase pattern
     },
-    hierarchy_info={"category": "electronics", "subcategory": "phones"}
+    hierarchy_info={"category": "electronics", "subcategory": "phones"},
 )
 
 headphones = Entity(
     embeddings={
-        "text": [0.1, 0.0, 0.9, 0.8],     # very different text
-        "audio": [0.5, 0.5, 0.5, 0.5],     # different modality entirely
+        "text": [0.1, 0.0, 0.9, 0.8],  # very different text
+        "audio": [0.5, 0.5, 0.5, 0.5],  # different modality entirely
     },
-    hierarchy_info={"category": "electronics", "subcategory": "audio"}
+    hierarchy_info={"category": "electronics", "subcategory": "audio"},
 )
 
 cube = EmbeddingCube()
@@ -165,10 +163,7 @@ cube.add_entity(phone)
 cube.add_entity(headphones)
 
 # Discover relationships (cosine similarity >= threshold)
-relationships = cube.discover_relationships(
-    entity_ids=[laptop.id],
-    threshold=0.7
-)
+relationships = cube.discover_relationships(entity_ids=[laptop.id], threshold=0.7)
 # laptop <-> phone: high cosine similarity on shared modalities + hierarchy bonus
 # laptop <-> headphones: only "text" is shared, low similarity — excluded
 
@@ -198,9 +193,9 @@ From [LeJEPA (arXiv:2511.08544)](https://arxiv.org/abs/2511.08544). Enforces an 
 from event_jepa_cube.regularizers import SIGReg
 
 sigreg = SIGReg(
-    num_directions=64,          # M random projection directions
-    sigma=1.0,                  # Epps-Pulley weighting window
-    num_quadrature_points=17,   # integration precision
+    num_directions=64,  # M random projection directions
+    sigma=1.0,  # Epps-Pulley weighting window
+    num_quadrature_points=17,  # integration precision
 )
 
 # In your training loop:
@@ -231,9 +226,9 @@ From [Rectified LpJEPA (arXiv:2602.01456)](https://arxiv.org/abs/2602.01456). Ge
 from event_jepa_cube.regularizers import RDMReg
 
 rdmreg = RDMReg(
-    p=2.0,                # distribution shape (2.0=Gaussian, 1.0=Laplacian)
+    p=2.0,  # distribution shape (2.0=Gaussian, 1.0=Laplacian)
     target_sparsity=0.5,  # 50% of entries will be zero
-    num_projections=64,   # sliced Wasserstein projections
+    num_projections=64,  # sliced Wasserstein projections
 )
 
 # Uses sliced 2-Wasserstein distance with ReLU rectification
@@ -273,10 +268,10 @@ from event_jepa_cube.regularizers import WeakSIGReg
 forward = MLPPredictor(embedding_dim=768, context_length=5, num_steps=2)
 
 trainer = BiJEPATrainer(
-    forward,                      # backward predictor auto-mirrored
-    cycle_weight=1.0,             # weight of the two cycle-consistency terms
-    norm_weight=0.01,             # NormReg against representation explosion
-    regularizer=WeakSIGReg(),     # optional SIGReg-family term
+    forward,  # backward predictor auto-mirrored
+    cycle_weight=1.0,  # weight of the two cycle-consistency terms
+    norm_weight=0.01,  # NormReg against representation explosion
+    regularizer=WeakSIGReg(),  # optional SIGReg-family term
 )
 
 history = trainer.train(sequences, epochs=100)
@@ -311,6 +306,7 @@ Register custom embedding processors via decorators:
 ```python
 from event_jepa_cube import register_embedding_type
 
+
 @register_embedding_type("sensor")
 class SensorEmbedding:
     def __init__(self, dim: int, sampling_rate: float):
@@ -329,6 +325,7 @@ Register custom models for the EmbeddingCube:
 ```python
 from event_jepa_cube import register_model
 
+
 @register_model("graph_attention")
 class GraphAttentionModel:
     def __init__(self, input_dim, heads=4):
@@ -338,6 +335,7 @@ class GraphAttentionModel:
     def forward(self, entity_embeddings):
         # Your relationship modeling logic
         return attention_scores
+
 
 # Load into a cube
 cube.load_registered_model("graph_attention", input_dim=768, heads=4)
@@ -392,8 +390,8 @@ event_jepa_cube/
 ## Development
 
 ```bash
-# Install dev dependencies
-pip install -e ".[dev]"
+# Install complete test and development dependencies
+pip install -e ".[test]"
 
 # Run tests
 pytest tests/ -v

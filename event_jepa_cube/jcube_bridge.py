@@ -46,9 +46,7 @@ DEFAULT_FILTER_TAG = "graph_node"
 DEFAULT_BATCH_SIZE = 10_000
 DEFAULT_GRAPH_PATH = "/data/jcube_graph.parquet"
 DEFAULT_WEIGHTS_PATH = "/cache/tkg-v5/node_emb_epoch_1.pt"
-_NODE_ID_RE = re.compile(
-    r"^(?:(?P<source_db>[^/]+)/)?ID_CD_(?P<entity_type>[A-Z0-9]+)_(?P<entity_id>.+)$"
-)
+_NODE_ID_RE = re.compile(r"^(?:(?P<source_db>[^/]+)/)?ID_CD_(?P<entity_type>[A-Z0-9]+)_(?P<entity_id>.+)$")
 
 
 @dataclass(frozen=True)
@@ -78,11 +76,7 @@ class NodeDescriptor:
 
 
 def load_bridge_config() -> BridgeConfig:
-    api_key = (
-        os.getenv("MYCELIA_API_KEY")
-        or os.getenv("MYCELIA_BEARER_TOKEN")
-        or os.getenv("FLIGHT_SECRET")
-    )
+    api_key = os.getenv("MYCELIA_API_KEY") or os.getenv("MYCELIA_BEARER_TOKEN") or os.getenv("FLIGHT_SECRET")
     if not api_key:
         raise RuntimeError("Set MYCELIA_API_KEY (or MYCELIA_BEARER_TOKEN) before running jcube_bridge.")
 
@@ -214,15 +208,13 @@ def push_embeddings_to_mycelia(
         }
 
     selected_indices = [
-        idx
-        for idx, node_id in enumerate(node_names)
-        if should_push_node(str(node_id), config.key_types)
+        idx for idx, node_id in enumerate(node_names) if should_push_node(str(node_id), config.key_types)
     ]
     total_inserted = 0
     batch_count = 0
 
     for batch_start in range(0, len(selected_indices), config.batch_size):
-        batch_indices = selected_indices[batch_start:batch_start + config.batch_size]
+        batch_indices = selected_indices[batch_start : batch_start + config.batch_size]
         batch_vectors: dict[str, list[float]] = {}
         metadata_by_id: dict[str, dict[str, Any]] = {}
         relations_by_id: dict[str, list[str]] = {}
@@ -340,6 +332,7 @@ if modal is not None:  # pragma: no branch - import-time configuration
         push_embeddings.remote()
 
 else:
+
     def push_embeddings() -> dict[str, Any]:  # type: ignore[no-redef]
         raise RuntimeError("modal is required to run jcube_bridge.push_embeddings")
 

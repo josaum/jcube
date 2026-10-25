@@ -27,10 +27,11 @@ from __future__ import annotations
 import argparse
 import json
 from collections import Counter
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 try:
     import pyarrow as pa
@@ -107,11 +108,11 @@ def load_formal_context_bundle(export_dir: str | Path) -> FormalContextBundle:
 
 def describe_formal_context(export_dir: str | Path) -> dict[str, Any]:
     bundle = load_formal_context_bundle(export_dir)
-    object_kinds = Counter()
+    object_kinds: Counter[str] = Counter()
     for row in bundle.objects.values():
         object_kinds[str(row.get("kind", "unknown"))] += 1
 
-    attribute_categories = Counter()
+    attribute_categories: Counter[str] = Counter()
     for row in bundle.attributes.values():
         attribute_categories[str(row.get("category", "attribute"))] += 1
 
@@ -134,10 +135,7 @@ def _ensure_parent(path: Path) -> None:
 
 def _ontology_text(attr_id: str, category: str, label: str) -> str:
     normalized = label.replace(":", " ")
-    return (
-        f"formal context attribute id={attr_id} category={category} "
-        f"label={label} normalized={normalized}"
-    )
+    return f"formal context attribute id={attr_id} category={category} label={label} normalized={normalized}"
 
 
 def _write_ontology_parquet(attributes: dict[str, dict[str, Any]], output_path: Path) -> int:
@@ -159,7 +157,7 @@ def _write_ontology_parquet(attributes: dict[str, dict[str, Any]], output_path: 
         }
     )
     pq.write_table(table, output_path, compression="zstd")
-    return table.num_rows
+    return int(table.num_rows)
 
 
 def _flush_graph_batch(
@@ -254,7 +252,9 @@ def materialize_formal_context(
     writer = _flush_graph_batch(writer, graph_schema, graph_path, graph_columns)
     if writer is None:
         _ensure_parent(graph_path)
-        pq.write_table(pa.table({name: [] for name in graph_schema.names}, schema=graph_schema), graph_path, compression="zstd")
+        pq.write_table(
+            pa.table({name: [] for name in graph_schema.names}, schema=graph_schema), graph_path, compression="zstd"
+        )
     else:
         writer.close()
 
@@ -315,9 +315,7 @@ def main() -> None:
         return
 
     if not args.graph_out or not args.ontology_out or not args.summary_out:
-        raise SystemExit(
-            "--graph-out, --ontology-out, and --summary-out are required unless --describe-only is set"
-        )
+        raise SystemExit("--graph-out, --ontology-out, and --summary-out are required unless --describe-only is set")
 
     summary = materialize_formal_context(
         export_dir,

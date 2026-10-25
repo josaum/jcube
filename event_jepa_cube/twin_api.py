@@ -214,13 +214,15 @@ def _catalog_fks(catalog: dict[str, Any]) -> list[dict[str, Any]]:
     for tname, entry in catalog["tables"].items():
         for rel in entry.get("relationships", []):
             if rel.get("relationship_type") == "foreign_key":
-                fks.append({
-                    "from_table": tname,
-                    "from_column": rel.get("column", ""),
-                    "to_table": rel.get("likely_references", ""),
-                    "confidence": 1.0,
-                    "join_example": rel.get("join_example", ""),
-                })
+                fks.append(
+                    {
+                        "from_table": tname,
+                        "from_column": rel.get("column", ""),
+                        "to_table": rel.get("likely_references", ""),
+                        "confidence": 1.0,
+                        "join_example": rel.get("join_example", ""),
+                    }
+                )
     return fks
 
 
@@ -249,9 +251,7 @@ def _load_embeddings(
     print(f"Loading embedding graph vocabulary from {gp}...")
     t0 = time.time()
     table = pq.read_table(gp, columns=["subject_id", "object_id"])
-    all_nodes = pa.chunked_array(
-        table.column("subject_id").chunks + table.column("object_id").chunks
-    )
+    all_nodes = pa.chunked_array(table.column("subject_id").chunks + table.column("object_id").chunks)
     unique_nodes = pc.unique(all_nodes)
     node_names = unique_nodes.to_numpy(zero_copy_only=False).astype(object)
     del table, all_nodes, unique_nodes
@@ -489,9 +489,11 @@ async def connect(req: ConnectRequest) -> dict[str, Any]:
         state.active_db = resolved_db_path
 
     domain_summary = {
-        k: {"table_count": len(v["tables"]) if isinstance(v.get("tables"), list) else 0,
+        k: {
+            "table_count": len(v["tables"]) if isinstance(v.get("tables"), list) else 0,
             "total_rows": v.get("total_rows", 0),
-            "description": v.get("description", k)}
+            "description": v.get("description", k),
+        }
         for k, v in serialized.get("domain_groups", {}).items()
     }
 
@@ -689,20 +691,24 @@ async def search(
 
     for tname, tdata in snap["tables"].items():
         if q_lower in tname.lower():
-            table_hits.append({
-                "table": tname,
-                "row_count": tdata.get("row_count", 0),
-                "domain": tdata.get("domain_group", "General"),
-            })
+            table_hits.append(
+                {
+                    "table": tname,
+                    "row_count": tdata.get("row_count", 0),
+                    "domain": tdata.get("domain_group", "General"),
+                }
+            )
         for col in tdata.get("columns", []):
             col_name = col.get("name", col) if isinstance(col, dict) else str(col)
             if q_lower in col_name.lower():
-                column_hits.append({
-                    "table": tname,
-                    "column": col_name,
-                    "dtype": col.get("dtype", "") if isinstance(col, dict) else "",
-                    "distinct_count": col.get("distinct_count", None) if isinstance(col, dict) else None,
-                })
+                column_hits.append(
+                    {
+                        "table": tname,
+                        "column": col_name,
+                        "dtype": col.get("dtype", "") if isinstance(col, dict) else "",
+                        "distinct_count": col.get("distinct_count", None) if isinstance(col, dict) else None,
+                    }
+                )
 
     return {
         "query": q,
@@ -869,10 +875,7 @@ async def get_entity_timeline(
 
     serialized = result_to_dict(result)
     seq = timeline.sequence
-    serialized["event_timestamps"] = [
-        {"index": i, "epoch": seq.timestamps[i]}
-        for i in range(len(seq.timestamps))
-    ]
+    serialized["event_timestamps"] = [{"index": i, "epoch": seq.timestamps[i]} for i in range(len(seq.timestamps))]
     return serialized
 
 
@@ -933,10 +936,7 @@ async def find_similar(
     nq = float(np.linalg.norm(query_vec).clip(min=1e-8))
 
     if entity_type:
-        candidates = [
-            i for i, name in enumerate(node_names)
-            if entity_type in str(name) and i != idx
-        ]
+        candidates = [i for i, name in enumerate(node_names) if entity_type in str(name) and i != idx]
         if not candidates:
             return {"query": node_id, "matches": [], "note": f"No nodes matching type '{entity_type}'"}
         candidate_idx = np.array(candidates)
@@ -1232,8 +1232,7 @@ def main() -> None:
                 serialized["domain_groups"] = _catalog_to_domain_groups(catalog)
                 serialized["foreign_keys"] = _catalog_fks(catalog)
                 serialized["catalog_path"] = args.catalog
-                print(f"Catalog overlaid: {len(catalog['tables'])} tables, "
-                      f"{len(serialized['foreign_keys'])} FKs")
+                print(f"Catalog overlaid: {len(catalog['tables'])} tables, {len(serialized['foreign_keys'])} FKs")
             except Exception as exc:
                 print(f"WARNING: Catalog overlay failed: {exc}")
 
@@ -1242,10 +1241,7 @@ def main() -> None:
         state.snapshots[resolved_db_path] = serialized
         if not state.config.require_explicit_db:
             state.active_db = resolved_db_path
-        print(
-            f"Twin ready: {snap.total_tables} tables, {snap.total_rows:,} rows "
-            f"(built in {snap.build_duration_s}s)"
-        )
+        print(f"Twin ready: {snap.total_tables} tables, {snap.total_rows:,} rows (built in {snap.build_duration_s}s)")
 
     # Embeddings are lazy — only pre-load if weights exist and startup is acceptable
     if os.path.exists(args.weights) and os.path.exists(args.graph):

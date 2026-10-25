@@ -43,9 +43,7 @@ def load_node_vocab(path: str | Path) -> dict[str, int] | list[str]:
     if isinstance(payload, dict):
         reserved = {"num_nodes", "num_predicates", "version", "artifact_dir"}
         normalized = {
-            str(key): int(value)
-            for key, value in payload.items()
-            if key not in reserved and isinstance(value, int)
+            str(key): int(value) for key, value in payload.items() if key not in reserved and isinstance(value, int)
         }
         if normalized:
             return normalized

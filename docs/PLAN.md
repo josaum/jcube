@@ -253,13 +253,15 @@ class EventJEPA:
 ### 3.3 Register regularizers in the registry
 
 ```python
-@register_model('sigreg')
+@register_model("sigreg")
 class SIGReg: ...
 
-@register_model('weak_sigreg')
+
+@register_model("weak_sigreg")
 class WeakSIGReg: ...
 
-@register_model('rdmreg')
+
+@register_model("rdmreg")
 class RDMReg: ...
 ```
 
@@ -330,11 +332,7 @@ warn_return_any = true
   ```python
   from event_jepa_cube import EventJEPA, SIGReg
 
-  processor = EventJEPA(
-      embedding_dim=768,
-      regularizer=SIGReg(num_directions=64),
-      reg_weight=0.05
-  )
+  processor = EventJEPA(embedding_dim=768, regularizer=SIGReg(num_directions=64), reg_weight=0.05)
   ```
 - Add section on choosing regularizer (SIGReg vs WeakSIGReg vs RDMReg)
 - Update performance claims with citations to LeJEPA paper

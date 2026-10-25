@@ -7,7 +7,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from event_jepa_cube.regularizers import NormReg, RDMReg, SIGReg, WeakSIGReg
+from event_jepa_cube.regularizers import NormReg, RDMReg, SIGReg, WeakSIGReg  # noqa: E402
 
 
 class TestSIGReg:

@@ -28,8 +28,9 @@ import logging
 import os
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from types import TracebackType
-from typing import Any, Callable, cast
+from typing import Any, cast
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)

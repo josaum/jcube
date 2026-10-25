@@ -33,7 +33,8 @@ mycelia-arrow = ["pyarrow>=23.0.1"]
 twin = ["duckdb>=1.5.2", "pyarrow>=23.0.1", "fastapi>=0.100", "uvicorn>=0.20"]
 train = ["torch>=2.0", "transformers>=4.40", "peft>=0.10", "accelerate>=0.25", "duckdb>=1.5.2", "pyarrow>=23.0.1"]
 dev = ["pytest>=7.0", "pytest-cov", "ruff", "mypy"]
-all = ["event-jepa-cube[numpy,torch,mycelia-arrow,twin,train,dev]"]
+test = ["event-jepa-cube[dev,twin,numpy]", "httpx2>=2.0"]
+all = ["event-jepa-cube[torch,mycelia-arrow,train,test]"]
 
 [project.scripts]
 digital-twin = "event_jepa_cube.twin_api:main"

@@ -1,6 +1,6 @@
 """Simple registries for embeddings and models."""
 
-from typing import Callable
+from collections.abc import Callable
 
 _embedding_registry: dict[str, Callable] = {}
 _model_registry: dict[str, Callable] = {}

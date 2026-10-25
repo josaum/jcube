@@ -10,7 +10,7 @@
 
 2. Install in development mode:
    ```bash
-   pip install -e ".[dev]"
+   pip install -e ".[test]"
    ```
 
 3. For PyTorch-dependent features:
