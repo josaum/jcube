@@ -136,18 +136,24 @@ def dense_context_loss(
     lambda_coeff: float,
     distance_floor: float,
 ) -> float:
-    """Compute weighted context L1 loss."""
+    """Compute lambda-scaled, distance-weighted mean context L1 loss.
+
+    Normalizing by the distance weights keeps the loss independent of the
+    number of context tokens. Lambda is applied after normalization so it
+    actually controls the strength of the context supervision.
+    """
     if HAS_NUMPY:
         pred = np.asarray(context_embeddings, dtype=np.float64)  # (C, D)
         tgt = np.asarray(target_embeddings, dtype=np.float64)  # (C, D)
         d = np.asarray(distances, dtype=np.float64)  # (C,)
         d = np.maximum(d, distance_floor)
-        weights = lambda_coeff / np.sqrt(d)  # (C,)
+        weights = 1.0 / np.sqrt(d)  # (C,)
         token_loss = np.abs(pred - tgt).mean(axis=1)  # (C,)
         total_weight = weights.sum()
-        if total_weight == 0.0:
+        if total_weight == 0.0 or lambda_coeff == 0.0:
             return 0.0
-        return float((weights * token_loss).sum() / total_weight)
+        weighted_mean = (weights * token_loss).sum() / total_weight
+        return float(lambda_coeff * weighted_mean)
     # Fallback
     import math
 
@@ -156,13 +162,13 @@ def dense_context_loss(
     total_weight = 0.0
     for i, (pred, target) in enumerate(zip(context_embeddings, target_embeddings)):
         d = max(distances[i], distance_floor)
-        weight = lambda_coeff / math.sqrt(d)
+        weight = 1.0 / math.sqrt(d)
         token_loss = sum(abs(pred[d_] - target[d_]) for d_ in range(dim)) / dim
         total_ctx_loss += weight * token_loss
         total_weight += weight
-    if total_weight > 0.0:
-        return total_ctx_loss / total_weight
-    return 0.0
+    if total_weight == 0.0 or lambda_coeff == 0.0:
+        return 0.0
+    return lambda_coeff * total_ctx_loss / total_weight
 
 
 # -----------------------------------------------------------------------
@@ -422,7 +428,7 @@ def detect_patterns_zscore(
         z = np.abs((vals - mean) / std)
         salient = np.where(z > z_threshold)[0].tolist()
         if len(salient) < 2:
-            sorted_idx = np.argsort(-np.abs(vals))[:min(fallback_k, len(values))]
+            sorted_idx = np.argsort(-np.abs(vals))[: min(fallback_k, len(values))]
             return sorted_idx.tolist()
         return sorted(salient)
 

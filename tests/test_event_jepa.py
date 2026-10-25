@@ -2,6 +2,7 @@
 
 import pytest
 
+from event_jepa_cube import numpy_ops as npo
 from event_jepa_cube.event_jepa import EventJEPA
 from event_jepa_cube.sequence import EventSequence
 
@@ -258,6 +259,46 @@ class TestComputeDenseLoss:
             lambda_coeff=0.5,
         )
         assert loss > base_loss
+
+    def test_lambda_scales_context_supervision(self):
+        jepa = EventJEPA(embedding_dim=1)
+        kwargs = {
+            "context_embeddings": [[0.0], [0.0]],
+            "context_timestamps": [1.0, 4.0],
+            "target_embeddings": [[1.0], [2.0]],
+            "mask_timestamps": [0.0],
+            "prediction_loss": 0.5,
+        }
+
+        low = jepa.compute_dense_loss(**kwargs, lambda_coeff=0.25)
+        high = jepa.compute_dense_loss(**kwargs, lambda_coeff=0.5)
+
+        # Distances [1, 4] produce weights [1, 0.5]. The normalized
+        # context loss is (1 * 1 + 0.5 * 2) / 1.5 = 4 / 3.
+        assert low == pytest.approx(0.5 + 0.25 * (4.0 / 3.0))
+        assert high == pytest.approx(0.5 + 0.5 * (4.0 / 3.0))
+        assert high - 0.5 == pytest.approx(2.0 * (low - 0.5))
+
+    def test_dense_loss_matches_expected_value_without_numpy(self, monkeypatch):
+        jepa = EventJEPA(embedding_dim=2)
+        kwargs = {
+            "context_embeddings": [[1.0, 2.0], [3.0, 4.0]],
+            "context_timestamps": [1.0, 4.0],
+            "target_embeddings": [[2.0, 3.0], [3.0, 8.0]],
+            "mask_timestamps": [0.0],
+            "prediction_loss": 0.25,
+            "lambda_coeff": 0.75,
+            "distance_floor": 1.0,
+        }
+
+        numpy_loss = jepa.compute_dense_loss(**kwargs)
+        monkeypatch.setattr(npo, "HAS_NUMPY", False)
+        python_loss = jepa.compute_dense_loss(**kwargs)
+
+        # Token L1 losses are 1 and 2; distance weights are 1 and 0.5.
+        # 0.25 + 0.75 * ((1 * 1 + 0.5 * 2) / 1.5) = 1.25.
+        assert numpy_loss == pytest.approx(1.25)
+        assert python_loss == pytest.approx(numpy_loss)
 
     def test_distance_weighting_near_mask(self):
         jepa = EventJEPA(embedding_dim=2)
