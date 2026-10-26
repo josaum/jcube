@@ -1,5 +1,11 @@
 # Implementation Plan — Event-JEPA-Cube
 
+> **Historical planning record.** The initial phases below are complete. Python
+> 3.9 references, early package sketches, and planned APIs are preserved for
+> context, not as current setup instructions. For the current implementation,
+> use [README.md](../README.md), [CONTRIBUTING.md](../CONTRIBUTING.md), and
+> [CHANGELOG.md](../CHANGELOG.md).
+
 ## Overview
 
 Transform the current stub/reference implementation into a functional JEPA

@@ -5,7 +5,7 @@
 run. V5 spent ~$35 of its ~$78 on failed runs; every item here maps to a way
 that happens again.
 
-## Findings → fixes (all landed in this branch)
+## Findings → fixes (landed in the V6.3 preparation work)
 
 | # | Finding | Fix |
 |---|---------|-----|
@@ -37,6 +37,9 @@ Legacy V6.2 checkpoints still resume: `_clean_state_dict()` strips the old
   init). Harmless; left as-is.
 
 ## The gate — run in this order, no skipping
+
+For a local CUDA/Kubernetes run instead of Modal, use the equivalent entrypoint
+and checks in [CLUSTER_TRAINING.md](CLUSTER_TRAINING.md).
 
 1. `modal run event_jepa_cube/scale_pipeline_v6.py --action smoke`
    (~cents). Must print `with_pyg_lib: True` and `sampler_ok: True`.

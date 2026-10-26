@@ -1,5 +1,8 @@
 # Contributing to Event-JEPA-Cube
 
+Event-JEPA-Cube supports Python 3.10–3.12. Use the `.[test]` extra for a complete
+local test environment, or `.[all]` when working on PyTorch-dependent features.
+
 ## Development Setup
 
 1. Clone the repository:
@@ -21,7 +24,7 @@
 ## Running Tests
 
 ```bash
-pytest tests/ -v
+python -m pytest -q
 ```
 
 ## Code Quality
@@ -31,7 +34,7 @@ Before submitting a PR, ensure:
 ```bash
 ruff check .
 ruff format --check .
-mypy event_jepa_cube/
+mypy event_jepa_cube/ --ignore-missing-imports
 ```
 
 ## Pull Request Process
@@ -39,8 +42,8 @@ mypy event_jepa_cube/
 1. Create a feature branch from `main`
 2. Make your changes with clear commit messages
 3. Add tests for new functionality
-4. Ensure all checks pass
-5. Submit a PR with a description of the changes
+4. Ensure all local checks pass and wait for lint, Python 3.10–3.12, and PyTorch CI jobs to go green
+5. Submit a PR with a description of the changes and the validation performed
 
 ## Code Style
 

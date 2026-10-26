@@ -11,7 +11,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Single test: `pytest tests/test_streaming.py -v`
 - Lint: `ruff check .`
 - Format: `ruff format .`
-- Type check: `mypy event_jepa_cube/`
+- Type check: `mypy event_jepa_cube/ --ignore-missing-imports`
+- CI: lint + Python 3.10/3.11/3.12 with `.[test]`, full suite with `.[all]`
 - Run digital twin API: `digital-twin --db /path/to/db.duckdb --port 8000`
 - GPU training (Modal): `modal run event_jepa_cube/scale_pipeline_v6.py --action full`
 - Pre-flight before ANY paid training run: `--action smoke`, then the gated order in `docs/V63_PREFLIGHT.md`
@@ -58,7 +59,8 @@ The package has a layered dependency structure — core modules use only stdlib,
 - `jcube_bridge.py` — Push embeddings to Mycelia/Milvus for production search through `MyceliaStore.store_vectors()` over Arrow Flight `do_exchange("vectors:{collection}")`
 - `code_ingestion.py` keeps code-symbol sync backend-agnostic: training may happen on Modal, but ingestion into Mycelia should consume artifacts through a stable adapter instead of ad hoc scripts
 - `modal_gpu.py` — Modal cloud GPU backend for training (A100-80GB)
-- `run_probe.py` — Embedding quality probes (LightGBM) on Modal CPU
+- `run_probe.py` / `run_probe_sweep.py` — LogisticRegression + Ridge probes on Modal CPU
+- `run_probe_hospital.py` — Hospital-specific LightGBM probes
 
 ### Data Flow (production pipeline)
 ```

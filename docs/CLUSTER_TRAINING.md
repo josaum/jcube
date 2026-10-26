@@ -1,9 +1,13 @@
-# Running jcube V6 training on a local GPU cluster
+# Running jcube V6/V6.3 training on a local GPU cluster
 
 The V6 pipeline (`scale_pipeline_v6.py`) is Modal-decorated end to end. This
 document covers the Modal-free path: `event_jepa_cube/train_local.py`, which
 runs the same `V6Trainer` on local hardware (Kubernetes/Kueue, Slurm, or a
 bare box) and is submittable as a normal GPU Job.
+
+Install the training dependencies with `pip install -e ".[train]"`. Before
+committing GPU time, run the image check and the gated smoke/A-B sequence below;
+use [V63_PREFLIGHT.md](V63_PREFLIGHT.md) for the corresponding Modal gate.
 
 ## Why a separate entrypoint
 

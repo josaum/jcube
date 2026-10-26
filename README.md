@@ -4,9 +4,10 @@
 
 Event-JEPA-Cube addresses fundamental limitations of standard Transformer architectures — fixed context windows, quadratic memory scaling, and single-modality bias — by providing hierarchical temporal processing, multi-modal embedding support, and mathematically grounded regularization within a unified entity representation system.
 
+[![CI](https://github.com/josaum/jcube/actions/workflows/ci.yml/badge.svg)](https://github.com/josaum/jcube/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![Tests](https://img.shields.io/badge/tests-394%20passed-brightgreen.svg)]()
+[![Tests](https://img.shields.io/badge/tests-397%20passed-brightgreen.svg)](https://github.com/josaum/jcube/actions/workflows/ci.yml)
 
 All code lives under the sovereign namespace: `https://github.com/josaum/jcube`.
 
@@ -18,7 +19,7 @@ All code lives under the sovereign namespace: `https://github.com/josaum/jcube`.
 
 2. **Unify multi-modal entity representations** — Combine text, image, audio, sensor, and behavioral embeddings into a single entity representation (the "Embedding Cube") with cross-modal relationship discovery via cosine similarity.
 
-3. **Ground embeddings in theory** — Implement SIGReg, WeakSIGReg, and RDMReg regularizers from the latest JEPA research (LeJEPA, 2024-2025) that enforce mathematically optimal embedding distributions, replacing brittle heuristics like stop-gradients and EMA teachers.
+3. **Ground embeddings in theory** — Implement SIGReg, WeakSIGReg, RDMReg, and NormReg from JEPA research published in 2025–2026. These regularizers target embedding shape, sparsity, covariance, and scale without relying on stop-gradients or EMA teachers.
 
 4. **Stay lightweight and extensible** — Zero dependencies for the core library. PyTorch is optional (only needed for regularizers). Decorator-based plugin system for custom embeddings and models.
 
@@ -70,7 +71,7 @@ print("Predictions:", predictions)  # Next predicted embeddings
 Run the included example:
 
 ```bash
-python example.py
+python -m examples.basic_usage
 ```
 
 ---
@@ -181,7 +182,7 @@ print(relationships)  # {laptop.id: [phone.id]}
 
 ## JEPA Regularizers
 
-Event-JEPA-Cube implements three regularizers from the latest JEPA research that enforce mathematically optimal embedding distributions. These require PyTorch.
+Event-JEPA-Cube implements four regularizers from recent JEPA research that control embedding distribution, covariance, sparsity, and scale. These require PyTorch.
 
 ### SIGReg — Sketched Isotropic Gaussian Regularization
 
@@ -347,12 +348,20 @@ cube.load_registered_model("graph_attention", input_dim=768, heads=4)
 
 ```
 event_jepa_cube/
-├── __init__.py          # Public API (EventJEPA, EmbeddingCube, Entity, etc.)
+├── __init__.py          # Public API exports
 ├── sequence.py          # EventSequence & Entity dataclasses
-├── event_jepa.py        # Hierarchical temporal processor
-├── embedding_cube.py    # Multi-semantic entity manager
-├── registry.py          # Plugin system (@register_embedding_type, @register_model)
-└── regularizers.py      # SIGReg, WeakSIGReg, RDMReg (requires PyTorch)
+├── event_jepa.py        # Hierarchical temporal processing and losses
+├── embedding_cube.py    # Multi-semantic entity relationships
+├── registry.py          # Decorator-based plugin registries
+├── streaming.py         # Incremental processing and snapshots
+├── training.py          # V-JEPA cooldown schedule
+├── numpy_ops.py         # NumPy acceleration with stdlib fallbacks
+├── regularizers.py      # SIGReg, WeakSIGReg, RDMReg, NormReg
+├── predictors.py        # MLP and Transformer predictors
+├── bijepa.py            # Bidirectional cycle-consistent training
+├── materializer.py      # DuckDB → temporal event sequences
+├── digital_twin.py      # Warehouse profiling and metadata graphs
+└── mycelia_store.py     # Vector storage, search, and Flight ingestion
 ```
 
 ### Design Principles
@@ -401,10 +410,12 @@ ruff check .
 ruff format .
 
 # Type check
-mypy event_jepa_cube/
+mypy event_jepa_cube/ --ignore-missing-imports
 ```
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the full development guide.
+CI runs these checks plus the test suite on Python 3.10, 3.11, and 3.12. A separate job installs `.[all]` and runs the complete PyTorch suite.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full development guide and [CHANGELOG.md](CHANGELOG.md) for recent fixes.
 
 ---
 
@@ -423,10 +434,10 @@ The regularizer implementations are based on the following papers:
 ## Citation
 
 ```bibtex
-@software{event_jepa_cube2024,
+@software{event_jepa_cube2026,
   author = {Agourakis, Dionisio Chiuratto},
   title = {Event-JEPA-Cube: Event Sequence Processing and Entity Relationships},
-  year = {2024},
+  year = {2026},
   publisher = {GitHub},
   url = {https://github.com/josaum/jcube}
 }

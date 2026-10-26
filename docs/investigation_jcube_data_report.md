@@ -1,5 +1,10 @@
 # Investigation: Nature of Data in `data/`
 
+> **Historical artifact investigation, 2026-03-23.** Findings refer to one local
+> `/Users/josaum/projects/jcube/data` snapshot and its pre-fix Parquet artifact.
+> They are not assertions about files in this repository or every current graph
+> build. Regenerate and validate artifacts before using the recommendations.
+
 ## Summary
 `/Users/josaum/projects/jcube/data` is not generic model input. It is a three-stage healthcare graph-training dataset: a 6.26 GB DuckDB operational warehouse, a 5.38 MB catalog that describes 411 of its tables, and an 882 MB derived temporal edge list used by the JEPA pipeline. The current `jcube_graph.parquet` is older than the March 23, 2026 `source_db`-prefix fix and therefore merges instance IDs across hospital systems, which materially corrupts graph identity.
 

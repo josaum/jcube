@@ -1,5 +1,10 @@
 # V5 Postmortem: GraphGPS + VICReg + 8-Loss Architecture
 
+> **Historical postmortem.** “Production” below refers to the V5 epoch-1 model
+> selected on 2026-03-23. It is not the current package default or a current
+> training recommendation. See [DIGITAL_TWIN.md](DIGITAL_TWIN.md) for the V6
+> architecture and [V63_PREFLIGHT.md](V63_PREFLIGHT.md) for the current gate.
+
 **Date:** 2026-03-23
 **Duration:** ~18 hours (design → training → evaluation → kill)
 **Cost:** ~$80 in A100 compute (Modal)
