@@ -1,5 +1,22 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- Dense context supervision now scales linearly with `lambda_coeff`; previously,
+  lambda cancelled during weight normalization and every non-zero value had the
+  same effect.
+- Restored Python 3.10 compatibility for Flight IPC enums while preserving
+  `StrEnum` string behavior.
+- CI now installs the dependencies imported by the tests and runs lint,
+  formatting, mypy, and tests successfully on Python 3.10–3.12.
+
+### Changed
+- Added a complete `.[test]` extra and aligned `.[all]`, CI, and contributor
+  setup instructions around it.
+- Updated project guides, current metrics, probe descriptions, and historical
+  document context.
+
 ## [0.3.0] - 2026-07-26
 
 ### Added
@@ -65,7 +82,7 @@
 - `EventSequence` and `Entity` dataclasses
 - Decorator-based extension registries (`@register_embedding_type`, `@register_model`)
 - JEPA regularizers: `SIGReg`, `WeakSIGReg`, `RDMReg`
-- Runnable example in `example.py`
+- Runnable example in `examples/basic_usage.py`
 - Project packaging via `pyproject.toml`
 - CI/CD via GitHub Actions
 - Comprehensive test suite
