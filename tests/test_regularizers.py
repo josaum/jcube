@@ -8,11 +8,13 @@ import pytest
 torch = pytest.importorskip("torch")
 
 from event_jepa_cube.regularizers import (  # noqa: E402
+    CorrelatedSIGReg,
     NormReg,
     RDMReg,
     SACReg,
     SIGReg,
     SubSIGReg,
+    TemporalDifferenceReg,
     WeakSIGReg,
     effective_rank,
 )
@@ -188,3 +190,43 @@ class TestRepresentationHealth:
         assert reg.compute_loss(embeddings).item() < reg.compute_loss(torch.ones(64, 8)).item()
         with pytest.raises(ValueError, match="embedding dimension"):
             reg.compute_loss(torch.randn(64, 4))
+
+
+class TestTemporalAndCorrelatedObjectives:
+    def test_temporal_difference_penalizes_static_predictions(self):
+        reg = TemporalDifferenceReg(delta_weight=1.0)
+        current = torch.tensor([[[0.0, 0.0], [1.0, 1.0], [2.0, 2.0]]])
+        target = current + 1.0
+
+        correct = reg.compute_loss(current, target, target)
+        static = reg.compute_loss(current, current, target)
+
+        assert correct.item() == pytest.approx(0.0)
+        assert static.item() > 0.0
+
+    def test_temporal_difference_handles_single_event_history(self):
+        reg = TemporalDifferenceReg(delta_weight=1.0)
+        current = torch.tensor([[[0.0, 0.0]]])
+        target = torch.tensor([[[1.0, 1.0], [2.0, 2.0]]])
+
+        correct = reg.compute_loss(current, target, target)
+        static = reg.compute_loss(current, current.repeat(1, 2, 1), target)
+
+        assert correct.item() == pytest.approx(0.0)
+        assert static.item() > 0.0
+
+    def test_correlated_target_penalizes_independent_dimensions_more(self):
+        independent = torch.eye(4)
+        target = torch.full((4, 4), 0.5).fill_diagonal_(1.0)
+        factor = torch.linalg.cholesky(target).t()
+        correlated = factor - factor.mean(dim=0, keepdim=True)
+        reg = CorrelatedSIGReg(rho=0.5)
+
+        independent_loss = reg.compute_loss(independent)
+        correlated_loss = reg.compute_loss(correlated)
+
+        assert correlated_loss.item() < independent_loss.item()
+
+    def test_correlated_reg_rejects_extreme_correlation(self):
+        with pytest.raises(ValueError, match="rho"):
+            CorrelatedSIGReg(rho=1.0)

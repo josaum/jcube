@@ -29,10 +29,12 @@ Legacy V6.2 checkpoints still resume: `_clean_state_dict()` strips the old
 
 - **Probe leakage:** embeddings see each admission's full history including
   outcomes, so LOS/Glosa probes partially read the label (V5's 0.690 AUC
-  included). Honest measurement needs time-split probes (embed with edges
-  truncated at admission time). Applies to the verify script, not the trainer.
-- **Per-rank graph loading:** each DDP rank still loads the 165M-edge table
-  independently (~memory-bounded, works in the 200GB container).
+  included). `temporal_probe_split` now provides a tested sample-level builder;
+  production verification still needs embeddings recomputed with edges
+  truncated at admission time.
+- **Per-rank graph loading:** `SharedGraphStore` provides attachable shared
+  storage for worker processes. The full 165M-edge DDP loader still needs to
+  adopt it (~memory-bounded, currently works in the 200GB container).
 
 ## Resolved since the original note
 

@@ -7,7 +7,7 @@ Event-JEPA-Cube addresses fundamental limitations of standard Transformer archit
 [![CI](https://github.com/josaum/jcube/actions/workflows/ci.yml/badge.svg)](https://github.com/josaum/jcube/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![Tests](https://img.shields.io/badge/tests-409%20passed-brightgreen.svg)](https://github.com/josaum/jcube/actions/workflows/ci.yml)
+[![Tests](https://img.shields.io/badge/tests-420%20passed-brightgreen.svg)](https://github.com/josaum/jcube/actions/workflows/ci.yml)
 
 All code lives under the sovereign namespace: `https://github.com/josaum/jcube`.
 
@@ -19,16 +19,16 @@ All code lives under the sovereign namespace: `https://github.com/josaum/jcube`.
 
 2. **Unify multi-modal entity representations** — Combine text, image, audio, sensor, and behavioral embeddings into a single entity representation (the "Embedding Cube") with cross-modal relationship discovery via cosine similarity.
 
-3. **Ground embeddings in theory** — Implement SIGReg, WeakSIGReg, RDMReg, NormReg, SACReg, and SubSIGReg from JEPA research published in 2025–2026. These regularizers target embedding shape, sparsity, covariance, scale, and spectral health without relying on stop-gradients or EMA teachers.
+3. **Ground embeddings in theory** — Implement eight regularizers from JEPA research published in 2025–2026. These target embedding shape, sparsity, covariance, scale, spectral health, temporal change, and multimodal correlation without relying on stop-gradients or EMA teachers.
 
-4. **Stay lightweight and extensible** — Zero dependencies for the core library. PyTorch is optional (only needed for regularizers). Decorator-based plugin system for custom embeddings and models.
+4. **Stay lightweight and extensible** — Minimal runtime dependencies (PyArrow only). PyTorch is optional (only needed for regularizers). Decorator-based plugin system for custom embeddings and models.
 
 ---
 
 ## Installation
 
 ```bash
-# Core library (zero dependencies)
+# Core library (PyArrow required)
 pip install -e .
 
 # With PyTorch for JEPA regularizers
@@ -182,7 +182,7 @@ print(relationships)  # {laptop.id: [phone.id]}
 
 ## JEPA Regularizers
 
-Event-JEPA-Cube implements six regularizers from recent JEPA research that control embedding distribution, covariance, sparsity, scale, and spectral health. These require PyTorch.
+Event-JEPA-Cube implements eight regularizers from recent JEPA research that control embedding distribution, covariance, sparsity, scale, spectral health, temporal change, and multimodal correlation. These require PyTorch.
 
 ### SIGReg — Sketched Isotropic Gaussian Regularization
 
@@ -273,6 +273,28 @@ subspace_loss = subreg.compute_loss(embeddings)
 
 Use `effective_rank(embeddings)` to compare representation geometries on training and validation data instead of assuming that higher rank is always better.
 
+### TemporalDifferenceReg — Motion-Aware Prediction
+
+From [MotionJEPA (arXiv:2609.23881)](https://arxiv.org/abs/2609.23881). Adds an embedding-difference MSE to the usual next-state objective, so static predictions cannot look accurate when the target is changing.
+
+```python
+from event_jepa_cube.regularizers import TemporalDifferenceReg
+
+motion = TemporalDifferenceReg(delta_weight=1.0)
+loss = motion.compute_loss(current, predicted_next, target_next)
+```
+
+### CorrelatedSIGReg — Correlated Gaussian Targets
+
+From [MM-LeJEPA (arXiv:2610.24681)](https://arxiv.org/abs/2610.24681). Matches full covariance to a target with cross-modal correlation `rho`, rather than forcing every dimension or modality to be independent.
+
+```python
+from event_jepa_cube.regularizers import CorrelatedSIGReg
+
+correlated = CorrelatedSIGReg(rho=0.5)
+loss = correlated.compute_loss(joint_multimodal_embeddings)
+```
+
 ### Choosing a Regularizer
 
 | Regularizer | Use When | Complexity | Sparsity |
@@ -283,6 +305,8 @@ Use `effective_rank(embeddings)` to compare representation geometries on trainin
 | **NormReg** | Symmetric/bidirectional prediction (BiJEPA); scale control alongside any of the above | O(N * d) | Dense |
 | **SACReg** | Protecting the backbone used for downstream transfer | O(N * d + d³) | Spectral |
 | **SubSIGReg** | Preserving low intrinsic dimensionality while preventing collapse | O(K * N * M) | Subspace |
+| **TemporalDifferenceReg** | Motion-aware sequential prediction | O(N * T * D) | Dynamic |
+| **CorrelatedSIGReg** | Learning correlated multimodal geometry | O(N * d²) | Correlated |
 
 ### Bidirectional Training — BiJEPATrainer
 
@@ -382,7 +406,7 @@ event_jepa_cube/
 ├── streaming.py         # Incremental processing and snapshots
 ├── training.py          # V-JEPA cooldown schedule
 ├── numpy_ops.py         # NumPy acceleration with stdlib fallbacks
-├── regularizers.py      # Six regularizers + effective-rank diagnostics
+├── regularizers.py      # Eight regularizers + effective-rank diagnostics
 ├── predictors.py        # MLP and Transformer predictors
 ├── bijepa.py            # Bidirectional cycle-consistent training
 ├── materializer.py      # DuckDB → temporal event sequences
@@ -392,7 +416,7 @@ event_jepa_cube/
 
 ### Design Principles
 
-- **Zero-dependency core** — The core library uses only Python stdlib. No numpy, no torch. This keeps the install lightweight and the API portable.
+- **Minimal runtime dependencies** — The core library requires PyArrow. NumPy and PyTorch remain optional, keeping the API lightweight and portable.
 - **Optional PyTorch** — Regularizers live in a separate module with a graceful `ImportError` fallback. Install with `pip install -e ".[torch]"` when needed.
 - **Dataclass-first** — `EventSequence` and `Entity` are plain dataclasses with validation. No framework lock-in.
 - **Plugin registries** — `@register_embedding_type` and `@register_model` decorators allow extending the framework without modifying source code.
@@ -448,6 +472,12 @@ docker build -t event-jepa-cube .
 docker run --rm event-jepa-cube
 ```
 
+Run the five synthetic research-gap experiments (leakage-free probes, shared graph memory, regularizer A/B, temporal-difference A/B, and correlated multimodal masking):
+
+```bash
+python -m examples.representation_gap_experiments
+```
+
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the full development guide and [CHANGELOG.md](CHANGELOG.md) for recent fixes.
 
 ---
@@ -467,6 +497,10 @@ The regularizer implementations are based on the following papers:
 - **λ-JEPA** — Spectral Anti-Collapse Regularization for Self-Supervised Learning. Protects the backbone representation used for downstream transfer. [arXiv:2609.35288](https://arxiv.org/abs/2609.35288)
 
 - **Sub-JEPA** — Subspace Gaussian Regularization for Stable End-to-End World Models. Relaxes full-space isotropy using multiple lower-dimensional Gaussian views. [arXiv:2605.09241](https://arxiv.org/abs/2605.09241)
+
+- **MotionJEPA** — Preventing Temporal Feature Collapse by Capturing Visual Changes in Latent Space. Motivates temporal-difference prediction objectives. [arXiv:2609.23881](https://arxiv.org/abs/2609.23881)
+
+- **MM-LeJEPA** — Correlated Gaussian Regularization for Multimodal Joint-Embedding Predictive Architectures. Motivates correlated covariance targets across modalities. [arXiv:2610.24681](https://arxiv.org/abs/2610.24681)
 
 ## Citation
 

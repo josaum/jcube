@@ -19,9 +19,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Architecture
 
-The package has a layered dependency structure — core modules use only stdlib, with heavier deps imported lazily and guarded by try/except in `__init__.py`.
+The package has a layered dependency structure — PyArrow is required, while heavier deps are imported lazily and guarded by try/except in `__init__.py`.
 
-### Core Layer (zero dependencies)
+### Core Layer (PyArrow required)
 - `sequence.py` — `EventSequence` and `Entity` dataclasses
 - `event_jepa.py` — Hierarchical temporal processor (multi-level windowing, time-decay weighting, pattern detection, trend prediction)
 - `embedding_cube.py` — Multi-modal entity manager (cosine similarity across shared modalities)
@@ -42,7 +42,7 @@ The package has a layered dependency structure — core modules use only stdlib,
 - `orchestrator.py` — `Pipeline` wires all components: DuckDB → Cascade → Mycelia → StreamingJEPA → GEPA, and defaults Mycelia vector sync to `vector_ingest_transport="flight"`
 
 ### PyTorch Layer (requires `torch`)
-- `regularizers.py` — SIGReg, WeakSIGReg, RDMReg, NormReg, SACReg, SubSIGReg, and effective-rank diagnostics
+- `regularizers.py` — Eight regularizers plus effective-rank diagnostics (SIGReg/WeakSIGReg/RDMReg/NormReg/SACReg/SubSIGReg/TemporalDifferenceReg/CorrelatedSIGReg)
 - `predictors.py` — `MLPPredictor`, `TransformerPredictor` (replace trend extrapolation with trained models)
 - `bijepa.py` — `BiJEPATrainer` bidirectional cycle-consistent JEPA training (BiJEPA, arXiv:2603.00049; see `docs/SOTA_2026.md`)
 
@@ -81,7 +81,7 @@ LEIO Code query-cache → code_ingestion.py → MyceliaStore.store_code_symbols(
 
 ## Conventions
 - Type annotations on all public functions
-- No external dependencies in core — torch, duckdb, pyarrow are optional with graceful ImportError fallback
+- PyArrow is required — torch and duckdb remain optional with graceful ImportError fallback
 - All public API exported from `__init__.py`
 - Ruff config: line-length=120, target Python 3.9, rules E/F/I/UP/B
 - Tests in `tests/` mirror module names (`test_<module>.py`)

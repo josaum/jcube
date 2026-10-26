@@ -21,10 +21,14 @@
 - `effective_rank` diagnostics and opt-in train/validation rank histories in
   `BiJEPATrainer`.
 - Reproducible Docker test environment and expanded 2026 research gap analysis.
+- Leakage-aware `temporal_probe_split`, attachable `SharedGraphStore`,
+  `TemporalDifferenceReg`, `CorrelatedSIGReg`, and relation-aware masking.
+- Runnable five-track synthetic experiment: `python -m examples.representation_gap_experiments`.
 
 ### Changed
 - Added a complete `.[test]` extra and aligned `.[all]`, CI, and contributor
   setup instructions around it.
+- Made PyArrow a required runtime dependency; Torch and DuckDB remain optional.
 - Updated project guides, current metrics, probe descriptions, and historical
   document context.
 
