@@ -9,9 +9,14 @@ JCUBE transforms a 5.8 GB DuckDB healthcare database (417 tables, 58M rows, 52 h
 
 Vector distance = operational similarity. Cosine similarity replaces SQL JOINs.
 
+> **Snapshot scope:** Dataset sizes and downstream metrics describe the March
+> 2026 healthcare run, not package defaults or guarantees for a new dataset.
+> Current training options include both Modal and the local GPU entrypoint in
+> [CLUSTER_TRAINING.md](CLUSTER_TRAINING.md).
+
 ---
 
-## Architecture (V6 — Current)
+## Architecture (V6/V6.3 — Current)
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -85,14 +90,19 @@ Vector distance = operational similarity. Cosine similarity replaces SQL JOINs.
 │  Applications:                                                  │
 │  ├─ Anomaly detection (z-score from centroid)                  │
 │  ├─ Semantic search (cosine similarity, 300ms)                 │
-│  ├─ Billing denial prediction (LightGBM, AUC 0.69)            │
+│  ├─ Billing denial prediction (linear probes, AUC 0.69)       │
 │  ├─ Length of stay estimation (MAE 2.3d for medium stays)      │
-│  ├─ Discharge type prediction (per-hospital LightGBM)          │
+│  ├─ Discharge type prediction (per-hospital probes)            │
 │  ├─ Embedding algebra (hospital DNA, trajectory vectors)        │
 │  ├─ Entity resolution (cross-hospital patient matching)         │
 │  └─ Milvus vector search (api.getjai.com integration)           │
 └─────────────────────────────────────────────────────────────────┘
 ```
+
+The V6.3 preparation adds `lookahead_mode`: `cross_entity` preserves checkpoint
+continuity, while `same_entity` applies a per-batch time cutoff and predicts each
+seed's own future representation. Select it only through the smoke A/B gate in
+[V63_PREFLIGHT.md](V63_PREFLIGHT.md).
 
 ---
 
@@ -131,7 +141,7 @@ unique_nodes = pc.unique(all_nodes)  # C++ dedup, 80s (was 19 min in Python)
 
 54K dictionary/ontology nodes (CID codes, TUSS procedures, categories) encoded with BGE-M3 (568M params, bidirectional, pt-BR native). CLS pooling → 1024-dim → project to 128-dim. Cached on Modal volume — subsequent runs skip encoding entirely.
 
-### Step 4: Graph-JEPA Training (A100-80GB)
+### Step 4: Graph-JEPA Training (Modal or local GPU)
 
 **Two-phase curriculum:**
 
@@ -240,14 +250,17 @@ python -m event_jepa_cube.exploit_twin similar ID_CD_INTERNACAO_53873 -k 10
 ```
 Cosine similarity on 128-dim vectors. Sub-second on 1.2M admissions.
 
-### Predictive Probes (LightGBM)
-- Billing denial (Glosa): ROC-AUC 0.69
-- Length of stay: MAE 2.3 days (medium stays)
-- Discharge type: per-hospital macro-AUC 0.58-0.76
+### Predictive Probes
+- `run_probe.py` and `run_probe_sweep.py`: L2-normalized linear probes using
+  LogisticRegression for billing denial and Ridge for length of stay.
+- `run_probe_hospital.py`: hospital-specific LightGBM classification/regression.
+- Historical snapshot: Glosa ROC-AUC 0.69, medium-stay MAE 2.3 days, and
+  per-hospital discharge macro-AUC 0.58–0.76. These figures predate the
+  time-split leakage concern documented in [V63_PREFLIGHT.md](V63_PREFLIGHT.md).
 
 ### Reports (Modal CPU → LaTeX → PDF)
 - Anomaly report: per-hospital, per-source, with AI interpretation
-- Admission-discharge analysis: LightGBM per hospital, business narrative
+- Admission-discharge analysis: hospital-specific models and business narrative
 - Embedding algebra: hospital DNA, trajectory vectors, entity resolution
 
 ### Mycelia Integration
@@ -266,7 +279,7 @@ Cosine similarity on 128-dim vectors. Sub-second on 1.2M admissions.
 | GNN backbone | Custom GraphGPS (GatedGCN + MultiHeadAttention) |
 | Temporal memory | Custom TGN (GRU, CPU-resident) |
 | Ontology encoder | BGE-M3 (BAAI, 568M params) |
-| Training compute | Modal A100-80GB (single GPU) |
+| Training compute | Modal A100/H100 or local CUDA GPUs via `train_local.py` |
 | Report generation | Modal CPU + pdflatex |
 | Vector search | Milvus via Mycelia API |
 | Data format | ZSTD Parquet (event stream) |

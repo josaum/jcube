@@ -1,5 +1,12 @@
 # Event-JEPA-Cube — Project Assessment
 
+> **Historical baseline assessment.** This describes the original stub, not the
+> current repository. As of October 2026, the P0/P1 findings have been addressed:
+> the package is installable, has an extensive test suite and CI, includes real
+> temporal algorithms, and ships contributor documentation. Current status and
+> architecture are maintained in [README.md](../README.md) and
+> [CHANGELOG.md](../CHANGELOG.md).
+
 ## Project Map
 
 ```
