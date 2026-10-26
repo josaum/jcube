@@ -32,9 +32,7 @@ def test_temporal_probe_split_is_chronological_and_leakage_free():
     assert [label for _, label in test] == ["middle", "later"]
     for sequence, _ in train + test:
         assert 999.0 not in sequence.embeddings
-    assert max(sequence.timestamps[-1] for sequence, _ in train) < min(
-        sequence.timestamps[-1] for sequence, _ in test
-    )
+    assert max(sequence.timestamps[-1] for sequence, _ in train) < min(sequence.timestamps[-1] for sequence, _ in test)
 
 
 def test_temporal_probe_split_validates_inputs():
