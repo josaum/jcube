@@ -10,6 +10,17 @@
   `StrEnum` string behavior.
 - CI now installs the dependencies imported by the tests and runs lint,
   formatting, mypy, and tests successfully on Python 3.10–3.12.
+- GEPA local search now preserves the best candidate ever evaluated and rejects
+  invalid search parameters.
+- Multilevel loss handles empty levels and mismatched weights safely; streaming
+  validates dimensions and timestamp order without partial state mutation.
+
+### Added
+- `SACReg` for backbone spectral anti-collapse regularization and `SubSIGReg`
+  for Gaussian regularization over frozen orthogonal subspaces.
+- `effective_rank` diagnostics and opt-in train/validation rank histories in
+  `BiJEPATrainer`.
+- Reproducible Docker test environment and expanded 2026 research gap analysis.
 
 ### Changed
 - Added a complete `.[test]` extra and aligned `.[all]`, CI, and contributor
