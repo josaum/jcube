@@ -1,5 +1,10 @@
 # Investigation: Nature of Data in `data/`
 
+> **Historical artifact investigation, 2026-03-23.** Findings refer to one local
+> `/Users/josaum/projects/jcube/data` snapshot and its pre-fix Parquet artifact.
+> They are not assertions about files in this repository or every current graph
+> build. Regenerate and validate artifacts before using the recommendations.
+
 ## Summary
 `/Users/josaum/projects/jcube/data` is not generic model input. It is a three-stage healthcare graph-training dataset: a 6.26 GB DuckDB operational warehouse, a 5.38 MB catalog that describes 411 of its tables, and an 882 MB derived temporal edge list used by the JEPA pipeline. The current `jcube_graph.parquet` is older than the March 23, 2026 `source_db`-prefix fix and therefore merges instance IDs across hospital systems, which materially corrupts graph identity.
 
@@ -65,7 +70,7 @@ The file contains `165,593,307` rows, `166` row groups, and `1,041` distinct pre
 - `('ID_CD_ARQUIVO_1', 'HAS_HOSPITAL_VIA_agg_tb_arquivos_relatorio_auditoria_rah_arar', 'ID_CD_HOSPITAL_114', 1753956942.53)`
 - `('ID_CD_ARQUIVO_2', 'HAS_HOSPITAL_VIA_agg_tb_arquivos_relatorio_auditoria_rah_arar', 'ID_CD_HOSPITAL_114', 1753956969.48)`
 
-Top predicates include `HAS_SETOR_VIA_agg_tb_tickets_x_setor_tixs`, `HAS_LOGIN_VIA_agg_tb_tickets_x_setor_tixs`, `HAS_FATURA_VIA_agg_tb_fatura_itens_fait`, `HAS_INTERNACAO_VIA_agg_tb_fatura_itens_fait`, and `HAS_TIPO_PERGUNTA_VIA_agg_tb_capta_produtividade_medica_prme`.  
+Top predicates include `HAS_SETOR_VIA_agg_tb_tickets_x_setor_tixs`, `HAS_LOGIN_VIA_agg_tb_tickets_x_setor_tixs`, `HAS_FATURA_VIA_agg_tb_fatura_itens_fait`, `HAS_INTERNACAO_VIA_agg_tb_capta_produtividade_medica_prme`, and `HAS_TIPO_PERGUNTA_VIA_agg_tb_capta_produtividade_medica_prme`.  
 **Evidence:** Direct Parquet metadata and SQL queries over `read_parquet('data/jcube_graph.parquet')`.  
 **Conclusion:** The graph artifact is a time-stamped relation graph synthesized from operational tables by turning `ID_CD_*` co-occurrence into `(subject, predicate, object, time)` edges.
 
@@ -113,7 +118,7 @@ Sample: `ID_CD_FATURA = 5` appears in `21` distinct source systems, including `P
 **Findings:**
 - `event_jepa_cube/jcube_bridge.py:69` correctly parses both `GHO-BRADESCO/ID_CD_INTERNACAO_117926` and `ID_CD_CID_A419`.
 - `event_jepa_cube/jcube_bridge.py:180` filters by `source_db`, so the current unprefixed graph makes hospital-scoped filtering ineffective.
-- `event_jepa_cube/jcube_bridge.py:195` stores a whole batch with the `filter_tag` from the last parsed item in that batch.
+- `event_jepa_cube/jcube_bridge.py:195` stores a whole batch with `filter_tag` from the last parsed item in that batch.
 - `event_jepa_cube/exploit_twin.py:102` extracts entity type by splitting directly on `_`, which breaks for prefixed instance IDs.
 - `event_jepa_cube/exploit_twin.py:310` builds lookup keys like `ID_CD_INTERNACAO_{eid}`, which will not match prefixed graph IDs after regeneration.
 - `event_jepa_cube/graph_loader.py:65` and `event_jepa_cube/graph_loader.py:121` operate directly on DuckDB columns and raw IDs, so they are not dependent on graph node string format.
