@@ -49,5 +49,5 @@ mypy event_jepa_cube/ --ignore-missing-imports
 
 - Follow PEP 8 conventions
 - Use type annotations for all public APIs
-- Keep required runtime dependencies minimal: PyArrow is required, while other heavy integrations stay optional
+- Keep required runtime dependencies minimal: PyArrow and DuckDB are required, while other heavy integrations stay optional
 - PyTorch-dependent code goes in `regularizers.py` with appropriate guards

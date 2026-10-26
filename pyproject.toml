@@ -21,7 +21,7 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
-dependencies = ["pyarrow>=23.0.1"]
+dependencies = ["pyarrow>=23.0.1", "duckdb>=2.0"]
 
 [project.optional-dependencies]
 numpy = ["numpy>=1.24"]
@@ -30,8 +30,8 @@ torch = ["torch>=2.0"]
 # removed; DuckDB is still pulled transitively by `twin` and `train`, which
 # genuinely open `duckdb.connect` against local `.duckdb` warehouse files.
 mycelia-arrow = ["pyarrow>=23.0.1"]
-twin = ["duckdb>=1.5.2", "pyarrow>=23.0.1", "fastapi>=0.100", "uvicorn>=0.20"]
-train = ["torch>=2.0", "transformers>=4.40", "peft>=0.10", "accelerate>=0.25", "duckdb>=1.5.2", "pyarrow>=23.0.1"]
+twin = ["duckdb>=2.0", "pyarrow>=23.0.1", "fastapi>=0.100", "uvicorn>=0.20"]
+train = ["torch>=2.0", "transformers>=4.40", "peft>=0.10", "accelerate>=0.25", "duckdb>=2.0", "pyarrow>=23.0.1"]
 dev = ["pytest>=7.0", "pytest-cov", "ruff", "mypy"]
 test = ["event-jepa-cube[dev,twin,numpy]", "httpx2>=2.0"]
 all = ["event-jepa-cube[torch,mycelia-arrow,train,test]"]

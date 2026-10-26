@@ -21,14 +21,14 @@ All code lives under the sovereign namespace: `https://github.com/josaum/jcube`.
 
 3. **Ground embeddings in theory** — Implement eight regularizers from JEPA research published in 2025–2026. These target embedding shape, sparsity, covariance, scale, spectral health, temporal change, and multimodal correlation without relying on stop-gradients or EMA teachers.
 
-4. **Stay lightweight and extensible** — Minimal runtime dependencies (PyArrow only). PyTorch is optional (only needed for regularizers). Decorator-based plugin system for custom embeddings and models.
+4. **Stay lightweight and extensible** — Minimal runtime dependencies (PyArrow and DuckDB). PyTorch is optional (only needed for regularizers). Decorator-based plugin system for custom embeddings and models.
 
 ---
 
 ## Installation
 
 ```bash
-# Core library (PyArrow required)
+# Core library (PyArrow and DuckDB required)
 pip install -e .
 
 # With PyTorch for JEPA regularizers
@@ -416,7 +416,7 @@ event_jepa_cube/
 
 ### Design Principles
 
-- **Minimal runtime dependencies** — The core library requires PyArrow. NumPy and PyTorch remain optional, keeping the API lightweight and portable.
+- **Minimal runtime dependencies** — The core library requires PyArrow and DuckDB. NumPy and PyTorch remain optional, keeping the API lightweight and portable.
 - **Optional PyTorch** — Regularizers live in a separate module with a graceful `ImportError` fallback. Install with `pip install -e ".[torch]"` when needed.
 - **Dataclass-first** — `EventSequence` and `Entity` are plain dataclasses with validation. No framework lock-in.
 - **Plugin registries** — `@register_embedding_type` and `@register_model` decorators allow extending the framework without modifying source code.
