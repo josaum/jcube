@@ -19,9 +19,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Architecture
 
-The package has a layered dependency structure — PyArrow is required, while heavier deps are imported lazily and guarded by try/except in `__init__.py`.
+The package has a layered dependency structure — PyArrow and DuckDB are required, while heavier deps are imported lazily and guarded by try/except in `__init__.py`.
 
-### Core Layer (PyArrow required)
+### Core Layer (PyArrow and DuckDB required)
 - `sequence.py` — `EventSequence` and `Entity` dataclasses
 - `event_jepa.py` — Hierarchical temporal processor (multi-level windowing, time-decay weighting, pattern detection, trend prediction)
 - `embedding_cube.py` — Multi-modal entity manager (cosine similarity across shared modalities)
@@ -81,7 +81,7 @@ LEIO Code query-cache → code_ingestion.py → MyceliaStore.store_code_symbols(
 
 ## Conventions
 - Type annotations on all public functions
-- PyArrow is required — torch and duckdb remain optional with graceful ImportError fallback
+- PyArrow and DuckDB are required — torch remains optional with graceful ImportError fallback
 - All public API exported from `__init__.py`
 - Ruff config: line-length=120, target Python 3.9, rules E/F/I/UP/B
 - Tests in `tests/` mirror module names (`test_<module>.py`)

@@ -28,7 +28,7 @@
 ### Changed
 - Added a complete `.[test]` extra and aligned `.[all]`, CI, and contributor
   setup instructions around it.
-- Made PyArrow a required runtime dependency; Torch and DuckDB remain optional.
+- Made PyArrow and DuckDB required runtime dependencies; Torch remains optional.
 - Updated project guides, current metrics, probe descriptions, and historical
   document context.
 
