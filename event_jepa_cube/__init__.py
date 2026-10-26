@@ -18,9 +18,29 @@ __all__ = [
 
 # Regularizers are optional (require PyTorch)
 try:
-    from .regularizers import NormReg, RDMReg, SACReg, SIGReg, SubSIGReg, WeakSIGReg, effective_rank
+    from .regularizers import (
+        CorrelatedSIGReg,
+        NormReg,
+        RDMReg,
+        SACReg,
+        SIGReg,
+        SubSIGReg,
+        TemporalDifferenceReg,
+        WeakSIGReg,
+        effective_rank,
+    )
 
-    __all__ += ["SIGReg", "WeakSIGReg", "RDMReg", "NormReg", "SACReg", "SubSIGReg", "effective_rank"]
+    __all__ += [
+        "SIGReg",
+        "WeakSIGReg",
+        "RDMReg",
+        "NormReg",
+        "SACReg",
+        "SubSIGReg",
+        "TemporalDifferenceReg",
+        "CorrelatedSIGReg",
+        "effective_rank",
+    ]
 except ImportError:
     pass
 
@@ -96,6 +116,12 @@ __all__ += [
 from .streaming import StreamBuffer, StreamingJEPA
 
 __all__ += ["StreamingJEPA", "StreamBuffer"]
+
+# Leakage-aware evaluation and relation-aware graph experiments
+from .evaluation import SharedGraphStore, temporal_probe_split, truncate_sequence_at_time
+from .masking import relation_aware_mask
+
+__all__ += ["SharedGraphStore", "temporal_probe_split", "truncate_sequence_at_time", "relation_aware_mask"]
 
 # Numpy-accelerated ops and mmap store (numpy optional)
 from .numpy_ops import HAS_NUMPY, MmapEmbeddingStore

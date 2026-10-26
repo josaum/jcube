@@ -3,7 +3,8 @@
 Includes SIGReg, WeakSIGReg, RDMReg, NormReg, SACReg, and SubSIGReg,
 grounded in LeJEPA (arXiv:2511.08544), Weak-SIGReg (arXiv:2603.05924),
 Rectified LpJEPA (arXiv:2602.01456), BiJEPA (arXiv:2603.00049),
-lambda-JEPA (arXiv:2609.35288), and Sub-JEPA (arXiv:2605.09241).
+lambda-JEPA (arXiv:2609.35288), Sub-JEPA (arXiv:2605.09241),
+MotionJEPA (arXiv:2609.23881), and MM-LeJEPA (arXiv:2610.24681).
 
 Requires PyTorch. Install with: pip install event-jepa-cube[torch]
 """
@@ -458,3 +459,67 @@ class SubSIGReg:
             subspace = embeddings @ projection[:, start : start + self.subspace_dim]
             losses.append(regularizer.compute_loss(subspace))
         return torch.stack(losses).mean()
+
+
+class TemporalDifferenceReg:
+    """Motion-aware auxiliary loss for sequential predictions.
+
+    Combines the ordinary next-state MSE with an MSE over embedding
+    differences. The second term prevents a static representation from looking
+    artificially accurate when the target sequence is changing.
+    """
+
+    def __init__(self, delta_weight: float = 1.0) -> None:
+        _require_torch()
+        if delta_weight < 0.0:
+            raise ValueError("delta_weight must be non-negative")
+        self.delta_weight = delta_weight
+
+    def compute_loss(self, current: Tensor, predicted_next: Tensor, target_next: Tensor) -> Tensor:
+        """Compute next-state and temporal-difference losses on ``(N, T, D)`` tensors."""
+        _require_torch()
+        if current.ndim != 3 or predicted_next.ndim != 3 or target_next.ndim != 3:
+            raise ValueError("current, predicted_next, and target_next must have shape (N, T, D)")
+        if predicted_next.shape != target_next.shape:
+            raise ValueError("predicted_next and target_next must have identical shapes")
+        if current.shape[0] != predicted_next.shape[0] or current.shape[2] != predicted_next.shape[2]:
+            raise ValueError("current must match prediction batch size and embedding dimension")
+
+        base_loss = torch.nn.functional.mse_loss(predicted_next, target_next)
+        if current.shape[1] == 1:
+            predicted_delta = predicted_next - current
+            target_delta = target_next - current
+        else:
+            predicted_delta = predicted_next[:, 1:] - current[:, :-1]
+            target_delta = target_next[:, 1:] - current[:, :-1]
+        return base_loss + self.delta_weight * torch.nn.functional.mse_loss(predicted_delta, target_delta)
+
+
+class CorrelatedSIGReg:
+    """Covariance regularization with a correlated Gaussian target.
+
+    MM-LeJEPA (arXiv:2610.24681) motivates cross-modal covariance rather than
+    independent isotropic targets. ``rho`` controls the shared off-diagonal
+    covariance; zero recovers an isotropic Gaussian target.
+    """
+
+    def __init__(self, rho: float = 0.5) -> None:
+        _require_torch()
+        if not -1.0 < rho < 1.0:
+            raise ValueError("rho must be in (-1, 1)")
+        self.rho = rho
+
+    def compute_loss(self, embeddings: Tensor) -> Tensor:
+        """Compute full-covariance squared Frobenius distance to the target."""
+        _require_torch()
+        if embeddings.ndim != 2:
+            raise ValueError("embeddings must have shape (N, d)")
+        n, d = embeddings.shape
+        if n == 0 or d == 0:
+            return embeddings.sum() * 0.0
+
+        centered = embeddings - embeddings.mean(dim=0, keepdim=True)
+        covariance = (centered.t() @ centered) / float(n)
+        target = torch.full((d, d), self.rho, device=embeddings.device, dtype=embeddings.dtype)
+        target.fill_diagonal_(1.0)
+        return torch.norm(covariance - target, p="fro") ** 2
