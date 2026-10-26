@@ -3,7 +3,7 @@
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Build & Test
-- Install dev: `pip install -e ".[dev]"`
+- Install test dependencies: `pip install -e ".[test]"`
 - Install with torch: `pip install -e ".[torch]"`
 - Install for training: `pip install -e ".[train]"` (torch + transformers + peft + accelerate + duckdb + pyarrow)
 - Install all: `pip install -e ".[all]"`

@@ -18,7 +18,8 @@ Example::
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
@@ -135,7 +136,7 @@ class FlightTransfer:
             observation.add_logical_bytes(logical_nbytes(table))
             return table
 
-    def _write_observation(self):
+    def _write_observation(self) -> Any:
         from event_jepa_cube.flight_compression import FlightIpcDirection, FlightRpcAction, observe_flight_operation
 
         route = "jcube.client.dynamic"

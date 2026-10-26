@@ -382,6 +382,7 @@ class Materializer:
             "WHERE table_schema = 'main' "
             "ORDER BY table_name, ordinal_position"
         ).to_arrow_table()
+        assert arrow is not None
 
         table_cols: dict[str, list[tuple[str, str]]] = {}
         for i in range(len(arrow)):
@@ -515,10 +516,7 @@ class Materializer:
         assert self._temporal_tables is not None
 
         # Find tables for this entity type
-        tables = [
-            tt for tt in self._temporal_tables
-            if tt.entity_type == entity_type
-        ]
+        tables = [tt for tt in self._temporal_tables if tt.entity_type == entity_type]
         if table_filter:
             tables = [tt for tt in tables if tt.name in table_filter]
 
@@ -597,12 +595,11 @@ class Materializer:
             where = "WHERE " + " AND ".join(where_parts)
 
             try:
-                arrow_table = con.execute(
-                    f"SELECT * FROM {safe_tbl} {where} ORDER BY {safe_ts}"
-                ).to_arrow_table()
+                arrow_table = con.execute(f"SELECT * FROM {safe_tbl} {where} ORDER BY {safe_ts}").to_arrow_table()
             except Exception:
                 continue
 
+            assert arrow_table is not None
             if len(arrow_table) == 0:
                 continue
 

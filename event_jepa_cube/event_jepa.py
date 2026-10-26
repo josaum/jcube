@@ -6,8 +6,8 @@ Uses numpy-accelerated operations when available, with pure-Python fallback.
 from __future__ import annotations
 
 import statistics
-from collections.abc import Iterable
-from typing import Any, Callable
+from collections.abc import Callable, Iterable
+from typing import Any
 
 from . import numpy_ops as npo
 from .sequence import EventSequence

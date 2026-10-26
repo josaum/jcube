@@ -13,15 +13,14 @@ import random
 import resource
 import time
 from dataclasses import dataclass
-from typing import List
 
 from event_jepa_cube import EmbeddingCube, Entity, EventJEPA, EventSequence
-from event_jepa_cube.streaming import StreamBuffer, StreamingJEPA
-
+from event_jepa_cube.streaming import StreamingJEPA
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class BenchResult:
@@ -43,7 +42,7 @@ def _rss_mb() -> float:
     return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024  # Linux: kB -> MB
 
 
-def _rand_embedding(dim: int) -> List[float]:
+def _rand_embedding(dim: int) -> list[float]:
     return [random.gauss(0, 1) for _ in range(dim)]
 
 
@@ -67,14 +66,18 @@ def _bench(name: str, fn, iterations: int) -> BenchResult:
 
 
 def _print_result(r: BenchResult) -> None:
-    print(f"  {r.name:<45s}  {r.per_iter_ms:>9.3f} ms/iter   {r.throughput:>10.1f} iter/s   RSS delta {r.peak_rss_mb:+.1f} MB")
+    print(
+        f"  {r.name:<45s}  {r.per_iter_ms:>9.3f} ms/iter   "
+        f"{r.throughput:>10.1f} iter/s   RSS delta {r.peak_rss_mb:+.1f} MB"
+    )
 
 
 # ---------------------------------------------------------------------------
 # Benchmarks
 # ---------------------------------------------------------------------------
 
-def bench_process_scaling(dims: List[int], lengths: List[int]) -> None:
+
+def bench_process_scaling(dims: list[int], lengths: list[int]) -> None:
     """EventJEPA.process() across dims and sequence lengths."""
     print("\n== EventJEPA.process() scaling ==")
     for dim in dims:
@@ -82,7 +85,7 @@ def bench_process_scaling(dims: List[int], lengths: List[int]) -> None:
         for n in lengths:
             seq = _make_sequence(n, dim)
             iters = max(1, 500 // max(1, n // 100))
-            r = _bench(f"dim={dim:<4d} n={n}", lambda: jepa.process(seq), iters)
+            r = _bench(f"dim={dim:<4d} n={n}", lambda jepa=jepa, seq=seq: jepa.process(seq), iters)
             _print_result(r)
 
 
@@ -92,7 +95,7 @@ def bench_process_multilevel(dim: int, n: int) -> None:
     for levels in [1, 2, 4, 8]:
         jepa = EventJEPA(embedding_dim=dim, num_levels=levels)
         seq = _make_sequence(n, dim)
-        r = _bench(f"levels={levels}", lambda: jepa.process_multilevel(seq), 200)
+        r = _bench(f"levels={levels}", lambda jepa=jepa, seq=seq: jepa.process_multilevel(seq), 200)
         _print_result(r)
 
 
@@ -102,7 +105,7 @@ def bench_predict_next(dim: int, n: int) -> None:
     jepa = EventJEPA(embedding_dim=dim)
     seq = _make_sequence(n, dim)
     for steps in [1, 5, 20]:
-        r = _bench(f"steps={steps}", lambda: jepa.predict_next(seq, num_steps=steps), 200)
+        r = _bench(f"steps={steps}", lambda steps=steps: jepa.predict_next(seq, num_steps=steps), 200)
         _print_result(r)
 
 
@@ -132,7 +135,7 @@ def bench_dense_loss(dim: int) -> None:
         print(f"  Dense overhead: {r2.per_iter_ms / r1.per_iter_ms:.2f}x")
 
 
-def bench_streaming_throughput(dims: List[int], n: int) -> None:
+def bench_streaming_throughput(dims: list[int], n: int) -> None:
     """StreamingJEPA.update() throughput (events/sec)."""
     print(f"\n== StreamingJEPA.update() throughput  n={n} ==")
     for dim in dims:
@@ -140,14 +143,17 @@ def bench_streaming_throughput(dims: List[int], n: int) -> None:
         embs = [_rand_embedding(dim) for _ in range(n)]
         ts = [float(i) for i in range(n)]
 
-        def run():
+        def run(sj=sj, embs=embs, ts=ts):
             sj.reset()
             for e, t in zip(embs, ts):
                 sj.update(e, t)
 
         r = _bench(f"dim={dim}", run, 5)
         evts_per_sec = n * r.iterations / r.total_sec
-        print(f"  dim={dim:<4d}  {r.per_iter_ms:>9.3f} ms/iter   {evts_per_sec:>12,.0f} events/s   RSS delta {r.peak_rss_mb:+.1f} MB")
+        print(
+            f"  dim={dim:<4d}  {r.per_iter_ms:>9.3f} ms/iter   "
+            f"{evts_per_sec:>12,.0f} events/s   RSS delta {r.peak_rss_mb:+.1f} MB"
+        )
 
 
 def bench_streaming_batch_vs_sequential(dim: int, n: int) -> None:
@@ -194,7 +200,7 @@ def bench_streaming_convergence(dim: int) -> None:
             norm_a = math.sqrt(sum(a * a for a in sr))
             norm_b = math.sqrt(sum(b * b for b in batch_repr))
             cos = dot / (norm_a * norm_b) if norm_a > 0 and norm_b > 0 else 0.0
-            print(f"  after {i+1:>4d} events: cosine_sim={cos:.6f}")
+            print(f"  after {i + 1:>4d} events: cosine_sim={cos:.6f}")
 
 
 def bench_embedding_cube(dim: int) -> None:
@@ -202,7 +208,7 @@ def bench_embedding_cube(dim: int) -> None:
     print(f"\n== EmbeddingCube  dim={dim} ==")
     cube = EmbeddingCube()
     entities = []
-    for i in range(200):
+    for _ in range(200):
         e = Entity(embeddings={"text": _rand_embedding(dim), "visual": _rand_embedding(dim)})
         entities.append(e)
 
@@ -234,6 +240,7 @@ def bench_memory_large_sequence(dim: int, max_n: int) -> None:
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Benchmark event-jepa-cube")
@@ -271,7 +278,7 @@ def bench_embedding_cube_batch(dim: int) -> None:
 
     cube = EmbeddingCube()
     entities = []
-    for i in range(200):
+    for _ in range(200):
         e = Entity(embeddings={"text": _rand_embedding(dim), "visual": _rand_embedding(dim)})
         entities.append(e)
         cube.add_entity(e)

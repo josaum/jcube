@@ -15,6 +15,7 @@ import pytest
 from event_jepa_cube.flight_compression import (
     PYTHON_CLIENT32_POSTDECODE,
     ROUTE_KEYS,
+    FlightIpcCompression,
     FlightIpcDirection,
     FlightIpcObservation,
     FlightPolicyConfigError,
@@ -47,6 +48,14 @@ def _flight_info() -> MagicMock:
     info = MagicMock()
     info.endpoints = [endpoint]
     return info
+
+
+def test_string_enum_preserves_strenum_behavior() -> None:
+    codec = FlightIpcCompression.NONE
+
+    assert str(codec) == "none"
+    assert codec == "none"
+    assert codec.value == "none"
 
 
 def test_transfer_rejects_non_none_before_connect() -> None:

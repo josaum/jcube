@@ -150,9 +150,7 @@ class EmbeddingCube:
                     continue
 
                 sims = [
-                    self._cosine_similarity_cached(
-                        id_a, id_b, mod, entity_a.embeddings[mod], entity_b.embeddings[mod]
-                    )
+                    self._cosine_similarity_cached(id_a, id_b, mod, entity_a.embeddings[mod], entity_b.embeddings[mod])
                     for mod in shared
                 ]
                 avg_sim = sum(sims) / len(sims)

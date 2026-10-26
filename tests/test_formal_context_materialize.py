@@ -7,7 +7,10 @@ import pytest
 pa = pytest.importorskip("pyarrow")
 pq = pytest.importorskip("pyarrow.parquet")
 
-from event_jepa_cube.formal_context_materialize import describe_formal_context, materialize_formal_context
+from event_jepa_cube.formal_context_materialize import (  # noqa: E402
+    describe_formal_context,
+    materialize_formal_context,
+)
 
 
 def _write_jsonl(path, rows) -> None:

@@ -233,18 +233,25 @@ class DigitalTwin:
     # -- introspection via Arrow -------------------------------------------
 
     def _list_tables(self) -> list[str]:
-        arrow = self._con().execute(
-            "SELECT table_name FROM information_schema.tables "
-            "WHERE table_schema = 'main' ORDER BY table_name"
-        ).to_arrow_table()
+        arrow = (
+            self._con()
+            .execute("SELECT table_name FROM information_schema.tables WHERE table_schema = 'main' ORDER BY table_name")
+            .to_arrow_table()
+        )
+        assert arrow is not None
         return cast(list[str], arrow.column("table_name").to_pylist())
 
     def _describe_table(self, table: str) -> list[dict[str, Any]]:
-        arrow = self._con().execute(
-            "SELECT column_name, data_type, is_nullable "
-            f'FROM information_schema.columns WHERE table_name = \'{table}\' '
-            "ORDER BY ordinal_position"
-        ).to_arrow_table()
+        arrow = (
+            self._con()
+            .execute(
+                "SELECT column_name, data_type, is_nullable "
+                f"FROM information_schema.columns WHERE table_name = '{table}' "
+                "ORDER BY ordinal_position"
+            )
+            .to_arrow_table()
+        )
+        assert arrow is not None
         return [
             {
                 "name": arrow.column("column_name")[i].as_py(),
@@ -283,9 +290,7 @@ class DigitalTwin:
         base_type = dtype.upper().split("(")[0].strip()
         if base_type in _NUMERIC_TYPES or base_type in _TS_TYPES or base_type == "VARCHAR":
             try:
-                r = con.execute(
-                    f"SELECT MIN({safe_col}), MAX({safe_col}) FROM {safe_tbl}"
-                ).fetchone()
+                r = con.execute(f"SELECT MIN({safe_col}), MAX({safe_col}) FROM {safe_tbl}").fetchone()
                 if r:
                     stats["min_value"] = _serialize(r[0])
                     stats["max_value"] = _serialize(r[1])
@@ -304,9 +309,9 @@ class DigitalTwin:
         # Sample values (via Arrow)
         try:
             arrow = con.execute(
-                f"SELECT DISTINCT {safe_col} FROM {safe_tbl} "
-                f"WHERE {safe_col} IS NOT NULL LIMIT 5"
+                f"SELECT DISTINCT {safe_col} FROM {safe_tbl} WHERE {safe_col} IS NOT NULL LIMIT 5"
             ).to_arrow_table()
+            assert arrow is not None
             stats["sample_values"] = [_serialize(v) for v in arrow.column(0).to_pylist()]
         except Exception:
             stats["sample_values"] = []
@@ -324,6 +329,7 @@ class DigitalTwin:
                 arrow = con.execute(
                     f'SELECT DISTINCT source_db FROM "{t}" WHERE source_db IS NOT NULL LIMIT 100'
                 ).to_arrow_table()
+                assert arrow is not None
                 sources.update(arrow.column(0).to_pylist())
             except Exception:
                 continue
@@ -371,23 +377,19 @@ class DigitalTwin:
                     else:
                         parent_t, child_t = t2, t1
 
-                    col_name = next(
-                        cp.name for cp in tables[t1].columns if cp.name.upper() == col_key
-                    )
-                    col_name2 = next(
-                        cp.name for cp in tables[t2].columns if cp.name.upper() == col_key
-                    )
+                    col_name = next(cp.name for cp in tables[t1].columns if cp.name.upper() == col_key)
+                    col_name2 = next(cp.name for cp in tables[t2].columns if cp.name.upper() == col_key)
 
                     # Check value overlap via sample
                     try:
                         r = con.execute(
-                            f'SELECT COUNT(*) FROM ('
+                            f"SELECT COUNT(*) FROM ("
                             f'SELECT DISTINCT "{col_name}" AS v FROM "{parent_t}" '
                             f'WHERE "{col_name}" IS NOT NULL LIMIT {sample_size}'
-                            f') a INNER JOIN ('
+                            f") a INNER JOIN ("
                             f'SELECT DISTINCT "{col_name2}" AS v FROM "{child_t}" '
                             f'WHERE "{col_name2}" IS NOT NULL LIMIT {sample_size}'
-                            f') b ON a.v = b.v'
+                            f") b ON a.v = b.v"
                         ).fetchone()
                         overlap = r[0] if r else 0  # type: ignore[index]
                     except Exception:
@@ -496,9 +498,12 @@ class DigitalTwin:
         source_dbs = self._discover_source_dbs(table_names)
         for tname, tp in tables.items():
             try:
-                arrow = self._con().execute(
-                    f'SELECT DISTINCT source_db FROM "{tname}" WHERE source_db IS NOT NULL LIMIT 100'
-                ).to_arrow_table()
+                arrow = (
+                    self._con()
+                    .execute(f'SELECT DISTINCT source_db FROM "{tname}" WHERE source_db IS NOT NULL LIMIT 100')
+                    .to_arrow_table()
+                )
+                assert arrow is not None
                 tp.source_databases = arrow.column(0).to_pylist()
             except Exception:
                 tp.source_databases = []
@@ -559,6 +564,7 @@ class DigitalTwin:
     def table_sample(self, table: str, limit: int = 10) -> list[dict[str, Any]]:
         """Return sample rows from a table as list of dicts."""
         arrow = self._con().execute(f'SELECT * FROM "{table}" LIMIT {limit}').to_arrow_table()
+        assert arrow is not None
         return cast(list[dict[str, Any]], arrow.to_pylist())
 
     def table_arrow(self, table: str, *, limit: int | None = None) -> Any:
@@ -608,9 +614,7 @@ def snapshot_to_dict(snap: TwinSnapshot) -> dict[str, Any]:
             }
             for name, dg in snap.domain_groups.items()
         },
-        "tables": {
-            name: _table_to_dict(tp) for name, tp in snap.tables.items()
-        },
+        "tables": {name: _table_to_dict(tp) for name, tp in snap.tables.items()},
         "foreign_keys": [
             {
                 "from_table": fk.from_table,

@@ -13,8 +13,9 @@ import os
 import time
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
-from enum import StrEnum
-from typing import Any
+from enum import Enum
+from types import TracebackType
+from typing import Any, Literal
 
 import pyarrow as pa
 
@@ -28,7 +29,7 @@ POST_DECODE_MAX_STREAM_BYTES = 256 * 1024 * 1024
 BOUNDED_DECODE_READY = False
 MAX_EXACT_OBSERVATION_INTEGER = (1 << 53) - 1
 ROUTE_KEYS = ("jcube.client.dynamic",)
-ROUTE_POLICIES = {
+ROUTE_POLICIES: dict[str, dict[str, Any]] = {
     "jcube.client.dynamic": {
         "allowed_codecs": ("none",),
         "default_codec": "none",
@@ -41,25 +42,31 @@ _MISSING = object()
 _LOGGER = logging.getLogger(__name__)
 
 
-class FlightIpcCompression(StrEnum):
+class _StringEnum(str, Enum):
+    """Python 3.10-compatible equivalent of enum.StrEnum."""
+
+    __str__ = str.__str__
+
+
+class FlightIpcCompression(_StringEnum):
     NONE = "none"
     LZ4 = "lz4"
     ZSTD = "zstd"
 
 
-class FlightIpcDirection(StrEnum):
+class FlightIpcDirection(_StringEnum):
     READ = "read"
     WRITE = "write"
 
 
-class FlightRpcAction(StrEnum):
+class FlightRpcAction(_StringEnum):
     DO_GET = "do_get"
     DO_PUT = "do_put"
     DO_EXCHANGE = "do_exchange"
     DO_ACTION = "do_action"
 
 
-class FlightIpcOutcome(StrEnum):
+class FlightIpcOutcome(_StringEnum):
     OK = "ok"
     ENCODE_ERROR = "encode_error"
     DECODE_ERROR = "decode_error"
@@ -367,7 +374,12 @@ class _FlightOperationObservation:
             raise FlightObservationError("invalid Flight IPC observation")
         self._logical_bytes = total
 
-    def __exit__(self, exc_type, exc, traceback) -> bool:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> Literal[False]:
         if self._emitted:
             raise FlightObservationError("Flight IPC observation already emitted")
         self._emitted = True
