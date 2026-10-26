@@ -79,6 +79,7 @@ class SharedGraphStore:
         self.shape = shape
         self.dtype = dtype
         self.path = Path(tempfile.gettempdir()) / f"jcube_graph_{name}.npy"
+        self._array: Any
         if create:
             self._array = np.memmap(self.path, mode="w+", dtype=dtype, shape=shape)
         else:
