@@ -1,9 +1,9 @@
-"""JEPA regularizers: SIGReg, WeakSIGReg, RDMReg, and NormReg.
+"""JEPA regularizers and representation-health diagnostics.
 
-These regularizers enforce desirable distributional properties on learned
-embeddings, grounded in the theoretical framework of LeJEPA (arXiv:2511.08544),
-Weak-SIGReg (arXiv:2603.05924), Rectified LpJEPA (arXiv:2602.01456), and
-BiJEPA (arXiv:2603.00049).
+Includes SIGReg, WeakSIGReg, RDMReg, NormReg, SACReg, and SubSIGReg,
+grounded in LeJEPA (arXiv:2511.08544), Weak-SIGReg (arXiv:2603.05924),
+Rectified LpJEPA (arXiv:2602.01456), BiJEPA (arXiv:2603.00049),
+lambda-JEPA (arXiv:2609.35288), and Sub-JEPA (arXiv:2605.09241).
 
 Requires PyTorch. Install with: pip install event-jepa-cube[torch]
 """
@@ -342,3 +342,119 @@ class NormReg:
         _, d = embeddings.shape
         normalized_sq_norms = embeddings.pow(2).sum(dim=1) / float(d)
         return ((normalized_sq_norms - self.target_scale) ** 2).mean()
+
+
+def effective_rank(embeddings: Tensor) -> Tensor:
+    """Return the exponential entropy of the covariance spectrum.
+
+    Effective rank measures how evenly variance is distributed across feature
+    directions. Zero means no variation; higher values indicate more active
+    directions. Track it on both training and validation representations.
+    """
+    _require_torch()
+    if embeddings.ndim != 2:
+        raise ValueError("embeddings must have shape (N, d)")
+    n, _ = embeddings.shape
+    if n == 0:
+        return embeddings.sum() * 0.0
+
+    centered = embeddings - embeddings.mean(dim=0, keepdim=True)
+    covariance = (centered.t() @ centered) / float(n)
+    eigenvalues = torch.linalg.eigvalsh(covariance).clamp(min=0.0)
+    total = eigenvalues.sum()
+    if total.item() <= 0.0:
+        return total
+    probabilities = eigenvalues / total
+    entropy = -(probabilities * probabilities.clamp_min(1e-12).log()).sum()
+    return entropy.exp()
+
+
+class SACReg:
+    """Spectral anti-collapse regularization for backbone representations.
+
+    Implements the lambda-JEPA objective from arXiv:2609.35288, Definition 3.5:
+    ``0.5 * (||mean||^2 + tr(cov) - logdet(cov + eps*I) - d)``.
+    Apply it to the representation retained for downstream tasks, not only to
+    the projected embeddings used by the prediction objective.
+    """
+
+    def __init__(self, eps: float = 1e-4) -> None:
+        _require_torch()
+        if eps < 0.0:
+            raise ValueError("eps must be non-negative")
+        self.eps = eps
+
+    def compute_loss(self, embeddings: Tensor) -> Tensor:
+        """Compute the SACReg loss on an ``(N, d)`` representation batch."""
+        _require_torch()
+        if embeddings.ndim != 2:
+            raise ValueError("embeddings must have shape (N, d)")
+        n, d = embeddings.shape
+        if n == 0 or d == 0:
+            return embeddings.sum() * 0.0
+
+        mean = embeddings.mean(dim=0)
+        centered = embeddings - mean
+        covariance = (centered.t() @ centered) / float(n)
+        stabilized = covariance + self.eps * torch.eye(d, device=embeddings.device, dtype=embeddings.dtype)
+        _, logabsdet = torch.linalg.slogdet(stabilized)
+        return 0.5 * (mean.pow(2).sum() + torch.trace(covariance) - logabsdet - float(d))
+
+
+class SubSIGReg:
+    """SIGReg applied to frozen row-orthonormal latent subspaces.
+
+    Sub-JEPA (arXiv:2605.09241) relaxes the full-space isotropic Gaussian prior
+    by regularizing multiple lower-dimensional views. This preserves the
+    anti-collapse signal while allowing a lower intrinsic representation rank.
+    """
+
+    def __init__(
+        self,
+        num_subspaces: int = 4,
+        subspace_dim: int = 16,
+        num_directions: int = 64,
+        sigma: float = 1.0,
+        num_quadrature_points: int = 17,
+        quadrature_range: float = 5.0,
+    ) -> None:
+        _require_torch()
+        if num_subspaces < 1 or subspace_dim < 1:
+            raise ValueError("num_subspaces and subspace_dim must be positive")
+        self.num_subspaces = num_subspaces
+        self.subspace_dim = subspace_dim
+        self.num_directions = num_directions
+        self.sigma = sigma
+        self.num_quadrature_points = num_quadrature_points
+        self.quadrature_range = quadrature_range
+        self._projections: dict[tuple[int, torch.device], Tensor] = {}
+
+    def _get_projection(self, dim: int, device: torch.device) -> Tensor:
+        if self.num_subspaces * self.subspace_dim > dim:
+            raise ValueError("num_subspaces * subspace_dim must not exceed the embedding dimension")
+        key = (dim, device)
+        if key not in self._projections:
+            width = self.num_subspaces * self.subspace_dim
+            projection = torch.linalg.qr(torch.randn(dim, width, device=device)).Q
+            self._projections[key] = projection
+        return self._projections[key]
+
+    def compute_loss(self, embeddings: Tensor) -> Tensor:
+        """Compute mean SIGReg loss across the frozen latent subspaces."""
+        _require_torch()
+        if embeddings.ndim != 2:
+            raise ValueError("embeddings must have shape (N, d)")
+        dim = embeddings.shape[1]
+        projection = self._get_projection(dim, embeddings.device)
+        regularizer = SIGReg(
+            num_directions=self.num_directions,
+            sigma=self.sigma,
+            num_quadrature_points=self.num_quadrature_points,
+            quadrature_range=self.quadrature_range,
+        )
+        losses = []
+        for index in range(self.num_subspaces):
+            start = index * self.subspace_dim
+            subspace = embeddings @ projection[:, start : start + self.subspace_dim]
+            losses.append(regularizer.compute_loss(subspace))
+        return torch.stack(losses).mean()

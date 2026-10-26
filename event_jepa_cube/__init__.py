@@ -18,9 +18,9 @@ __all__ = [
 
 # Regularizers are optional (require PyTorch)
 try:
-    from .regularizers import NormReg, RDMReg, SIGReg, WeakSIGReg
+    from .regularizers import NormReg, RDMReg, SACReg, SIGReg, SubSIGReg, WeakSIGReg, effective_rank
 
-    __all__ += ["SIGReg", "WeakSIGReg", "RDMReg", "NormReg"]
+    __all__ += ["SIGReg", "WeakSIGReg", "RDMReg", "NormReg", "SACReg", "SubSIGReg", "effective_rank"]
 except ImportError:
     pass
 
