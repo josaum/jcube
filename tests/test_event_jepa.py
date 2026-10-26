@@ -390,6 +390,15 @@ class TestMultilevelLoss:
         # loss = 1.0 + 0.1 * (1.0 * 3.0) = 1.3
         assert loss == pytest.approx(1.3)
 
+    def test_empty_levels_returns_prediction_loss(self):
+        jepa = EventJEPA(embedding_dim=2, regularizer=lambda embeddings: 1.0)
+        assert jepa.compute_multilevel_loss([], prediction_loss=2.0) == 2.0
+
+    def test_mismatched_level_weights_rejected(self):
+        jepa = EventJEPA(embedding_dim=2, regularizer=lambda embeddings: 1.0)
+        with pytest.raises(ValueError, match="same length"):
+            jepa.compute_multilevel_loss([[[1.0, 2.0]]], prediction_loss=1.0, level_weights=[1.0, 0.0])
+
 
 class TestModalityConfig:
     """Tests for modality-specific processing."""

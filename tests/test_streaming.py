@@ -331,6 +331,28 @@ class TestStreamingJEPAEdgeCases:
         assert isinstance(patterns, list)
         assert len(patterns) == 2
 
+    def test_wrong_dimension_rejected_without_mutation(self):
+        sj = StreamingJEPA(embedding_dim=2)
+        with pytest.raises(ValueError, match="dimension"):
+            sj.update([1.0], 1.0)
+        assert sj.count == 0
+
+    def test_out_of_order_timestamp_rejected_without_mutation(self):
+        sj = StreamingJEPA(embedding_dim=2)
+        sj.update([1.0, 0.0], 2.0)
+        with pytest.raises(ValueError, match="non-decreasing"):
+            sj.update([0.0, 1.0], 1.0)
+        assert sj.count == 1
+        assert sj.last_timestamp == 2.0
+
+    def test_batch_validation_is_atomic(self):
+        sj = StreamingJEPA(embedding_dim=2)
+        with pytest.raises(ValueError, match="same length"):
+            sj.update_batch([[1.0, 0.0]], [])
+        with pytest.raises(ValueError, match="non-decreasing"):
+            sj.update_batch([[1.0, 0.0], [0.0, 1.0]], [2.0, 1.0])
+        assert sj.count == 0
+
 
 class TestStreamBuffer:
     """Tests for StreamBuffer."""

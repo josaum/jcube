@@ -351,6 +351,33 @@ class TestLocalSearch:
         scores = [r["score"] for r in result.results]
         assert scores == sorted(scores, reverse=True)
 
+    def test_best_candidate_is_never_lost_to_diversity_selection(self, gepa):
+        vectors = {"a": [1.0, 0.0], "b": [0.0, 1.0]}
+        seed = [0.9, 0.1]
+        result = gepa.search_local(
+            vectors,
+            seed_vector=seed,
+            iterations=8,
+            population_size=4,
+            mutation_rate=1.0,
+            diversity_weight=1.0,
+            seed_random=7,
+        )
+
+        seed_score = max(_cosine_similarity(seed, vector) for vector in vectors.values())
+        trajectory_scores = [
+            max(_cosine_similarity(query, vector) for vector in vectors.values()) for query in result.trajectory
+        ]
+        assert result.best_score >= seed_score
+        assert trajectory_scores == sorted(trajectory_scores)
+
+    def test_invalid_search_parameters_rejected(self, gepa):
+        vectors = {"a": [1.0, 0.0]}
+        with pytest.raises(ValueError, match="population_size"):
+            gepa.search_local(vectors, seed_vector=[1.0, 0.0], population_size=0)
+        with pytest.raises(ValueError, match="diversity_weight"):
+            gepa.search_local(vectors, seed_vector=[1.0, 0.0], diversity_weight=1.5)
+
     def test_results_contain_expected_keys(self, gepa):
         """Each result dict should have id, distance, score."""
         vectors = {"a": [1.0, 0.0], "b": [0.0, 1.0]}
