@@ -279,6 +279,12 @@ class GEPASearch:
         Returns:
             GEPAResult with results, evolution trajectory, and final query.
         """
+        if iterations < 0 or population_size < 1 or limit < 0:
+            raise ValueError("iterations and limit must be non-negative, and population_size must be positive")
+        if mutation_rate < 0.0:
+            raise ValueError("mutation_rate must be non-negative")
+        if not 0.0 <= diversity_weight <= 1.0:
+            raise ValueError("diversity_weight must be in [0, 1]")
         if not vectors:
             return GEPAResult(
                 results=[],
@@ -297,7 +303,9 @@ class GEPASearch:
         for _ in range(population_size - 1):
             population.append(_mutate(seed_vector, mutation_rate, rng))
 
-        trajectory: list[list[float]] = [list(seed_vector)]
+        best_query = list(seed_vector)
+        best_score = max((_cosine_similarity(best_query, v) for v in vec_matrix), default=0.0)
+        trajectory: list[list[float]] = [list(best_query)]
 
         # 2. Evolutionary loop
         for _iteration in range(iterations):
@@ -307,6 +315,13 @@ class GEPASearch:
                 sims = [_cosine_similarity(candidate, v) for v in vec_matrix]
                 # Best similarity against any stored vector
                 candidate_scores.append(max(sims) if sims else 0.0)
+
+            # Preserve the best candidate ever evaluated, independently of
+            # diversity-weighted survival in later generations.
+            iteration_best = max(range(len(population)), key=lambda i: candidate_scores[i])
+            if candidate_scores[iteration_best] > best_score:
+                best_score = candidate_scores[iteration_best]
+                best_query = list(population[iteration_best])
 
             # b. Diversity bonus: avg pairwise distance between candidates
             diversity_scores: list[float] = []
@@ -344,25 +359,14 @@ class GEPASearch:
 
             population = new_population
 
-            # f. Record trajectory: best candidate
-            ranked[0]
-            trajectory.append(list(population[0]))
+            # f. Record the best candidate found so far.
+            trajectory.append(list(best_query))
 
-        # 3. Final: take the best candidate
-        final_scores = []
-        for candidate in population:
-            sims = [_cosine_similarity(candidate, v) for v in vec_matrix]
-            final_scores.append(max(sims) if sims else 0.0)
-
-        best_candidate_idx = max(range(len(population)), key=lambda i: final_scores[i])
-        final_query = population[best_candidate_idx]
-        best_score = final_scores[best_candidate_idx]
-
-        # Find top-k nearest vectors to the final query
+        # 3. Find top-k nearest vectors to the best query ever evaluated.
         scored_vectors = []
         for vid, vec in zip(vec_ids, vec_matrix):
-            sim = _cosine_similarity(final_query, vec)
-            dist = _euclidean_distance(final_query, vec)
+            sim = _cosine_similarity(best_query, vec)
+            dist = _euclidean_distance(best_query, vec)
             scored_vectors.append({"id": vid, "distance": dist, "score": sim})
 
         scored_vectors.sort(key=lambda x: cast(float, x["score"]), reverse=True)
@@ -370,7 +374,7 @@ class GEPASearch:
 
         return GEPAResult(
             results=top_results,
-            final_query=final_query,
+            final_query=best_query,
             trajectory=trajectory,
             iterations_run=iterations,
             best_score=best_score,

@@ -32,7 +32,7 @@ import torch.nn as nn
 from torch import Tensor
 
 from .predictors import MLPPredictor, make_sliding_windows
-from .regularizers import NormReg
+from .regularizers import NormReg, effective_rank
 
 
 def _predictor_dims(predictor: nn.Module) -> tuple[int, int, int]:
@@ -64,6 +64,8 @@ class BiJEPATrainer:
         norm_weight: Weight of the NormReg term. Set to 0.0 to disable.
         regularizer: Optional SIGReg/WeakSIGReg/RDMReg instance.
         reg_weight: Weight of the optional distributional regularizer.
+        track_rank: Record effective rank on train and validation predictions.
+            Disabled by default to avoid covariance eigensolver overhead.
     """
 
     def __init__(
@@ -75,6 +77,7 @@ class BiJEPATrainer:
         norm_weight: float = 0.01,
         regularizer: Any = None,
         reg_weight: float = 0.05,
+        track_rank: bool = False,
     ) -> None:
         self.forward_predictor = forward_predictor
         if backward_predictor is None:
@@ -94,6 +97,7 @@ class BiJEPATrainer:
         self.norm_reg = NormReg() if norm_weight > 0.0 else None
         self.regularizer = regularizer
         self.reg_weight = reg_weight
+        self.track_rank = track_rank
         self.optimizer = torch.optim.Adam(
             list(forward_predictor.parameters()) + list(backward_predictor.parameters()),
             lr=lr,
@@ -146,6 +150,8 @@ class BiJEPATrainer:
         else:
             loss_reg = torch.tensor(0.0, device=contexts.device)
 
+        rank = effective_rank(flat_pred.detach()) if self.track_rank else torch.tensor(0.0, device=contexts.device)
+
         return {
             "total": total,
             "forward": loss_fwd,
@@ -153,6 +159,7 @@ class BiJEPATrainer:
             "cycle": loss_cycle,
             "norm": loss_norm,
             "reg": loss_reg,
+            "effective_rank": rank,
         }
 
     def prepare_dataset(self, sequences: list[Any]) -> tuple[Tensor, Tensor]:
@@ -189,6 +196,8 @@ class BiJEPATrainer:
             "backward_losses": [],
             "cycle_losses": [],
             "norm_losses": [],
+            "train_effective_ranks": [],
+            "val_effective_ranks": [],
             "best_epoch": 0,
         }
         if contexts.shape[0] == 0:
@@ -229,6 +238,9 @@ class BiJEPATrainer:
             with torch.no_grad():
                 val_losses = self.compute_losses(val_ctx, val_tgt)
             history["val_losses"].append(val_losses["total"].item())
+            if self.track_rank:
+                history["train_effective_ranks"].append(losses["effective_rank"].item())
+                history["val_effective_ranks"].append(val_losses["effective_rank"].item())
             self.forward_predictor.train()
             self.backward_predictor.train()
 
@@ -253,7 +265,13 @@ class BiJEPATrainer:
         contexts, targets = self.prepare_dataset(sequences)
 
         if contexts.shape[0] == 0:
-            return {"forward_mse": 0.0, "backward_mse": 0.0, "cycle_mse": 0.0, "cosine_similarity": 0.0}
+            return {
+                "forward_mse": 0.0,
+                "backward_mse": 0.0,
+                "cycle_mse": 0.0,
+                "cosine_similarity": 0.0,
+                "effective_rank": 0.0,
+            }
 
         self.forward_predictor.eval()
         self.backward_predictor.eval()
@@ -269,4 +287,5 @@ class BiJEPATrainer:
             "backward_mse": losses["backward"].item(),
             "cycle_mse": (losses["cycle"].item() / 2.0),
             "cosine_similarity": cos_sim,
+            "effective_rank": effective_rank(pred_flat).item(),
         }

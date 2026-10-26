@@ -42,7 +42,7 @@ The package has a layered dependency structure — core modules use only stdlib,
 - `orchestrator.py` — `Pipeline` wires all components: DuckDB → Cascade → Mycelia → StreamingJEPA → GEPA, and defaults Mycelia vector sync to `vector_ingest_transport="flight"`
 
 ### PyTorch Layer (requires `torch`)
-- `regularizers.py` — SIGReg, WeakSIGReg, RDMReg, NormReg (JEPA embedding regularizers from LeJEPA/BiJEPA papers)
+- `regularizers.py` — SIGReg, WeakSIGReg, RDMReg, NormReg, SACReg, SubSIGReg, and effective-rank diagnostics
 - `predictors.py` — `MLPPredictor`, `TransformerPredictor` (replace trend extrapolation with trained models)
 - `bijepa.py` — `BiJEPATrainer` bidirectional cycle-consistent JEPA training (BiJEPA, arXiv:2603.00049; see `docs/SOTA_2026.md`)
 

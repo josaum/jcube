@@ -7,7 +7,15 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from event_jepa_cube.regularizers import NormReg, RDMReg, SIGReg, WeakSIGReg  # noqa: E402
+from event_jepa_cube.regularizers import (  # noqa: E402
+    NormReg,
+    RDMReg,
+    SACReg,
+    SIGReg,
+    SubSIGReg,
+    WeakSIGReg,
+    effective_rank,
+)
 
 
 class TestSIGReg:
@@ -138,3 +146,45 @@ class TestNormReg:
             NormReg(target_scale=0.0)
         with pytest.raises(ValueError, match="target_scale"):
             NormReg(target_scale=-1.0)
+
+
+class TestRepresentationHealth:
+    def test_effective_rank_detects_collapse(self):
+        torch.manual_seed(42)
+        full = effective_rank(torch.randn(128, 8))
+        collapsed = effective_rank(torch.ones(128, 8))
+
+        assert full.item() > 1.0
+        assert collapsed.item() == pytest.approx(0.0)
+
+    def test_sacreg_penalizes_collapse_and_mean_shift(self):
+        torch.manual_seed(42)
+        reg = SACReg(eps=1e-4)
+        embeddings = torch.randn(128, 8)
+
+        centered_loss = reg.compute_loss(embeddings)
+        collapsed_loss = reg.compute_loss(torch.ones(128, 8))
+        shifted_loss = reg.compute_loss(embeddings + 5.0)
+
+        assert centered_loss.item() < collapsed_loss.item()
+        assert shifted_loss.item() > centered_loss.item()
+
+    def test_sacreg_is_differentiable(self):
+        reg = SACReg()
+        embeddings = torch.randn(32, 4, requires_grad=True)
+
+        loss = reg.compute_loss(embeddings)
+        loss.backward()
+
+        assert loss.dim() == 0
+        assert embeddings.grad is not None
+
+    def test_sub_sigreg_checks_shape_and_penalizes_collapse(self):
+        torch.manual_seed(42)
+        reg = SubSIGReg(num_subspaces=2, subspace_dim=4, num_directions=8)
+        embeddings = torch.randn(64, 8)
+
+        assert reg.compute_loss(embeddings).dim() == 0
+        assert reg.compute_loss(embeddings).item() < reg.compute_loss(torch.ones(64, 8)).item()
+        with pytest.raises(ValueError, match="embedding dimension"):
+            reg.compute_loss(torch.randn(64, 4))

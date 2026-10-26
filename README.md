@@ -7,7 +7,7 @@ Event-JEPA-Cube addresses fundamental limitations of standard Transformer archit
 [![CI](https://github.com/josaum/jcube/actions/workflows/ci.yml/badge.svg)](https://github.com/josaum/jcube/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![Tests](https://img.shields.io/badge/tests-397%20passed-brightgreen.svg)](https://github.com/josaum/jcube/actions/workflows/ci.yml)
+[![Tests](https://img.shields.io/badge/tests-409%20passed-brightgreen.svg)](https://github.com/josaum/jcube/actions/workflows/ci.yml)
 
 All code lives under the sovereign namespace: `https://github.com/josaum/jcube`.
 
@@ -19,7 +19,7 @@ All code lives under the sovereign namespace: `https://github.com/josaum/jcube`.
 
 2. **Unify multi-modal entity representations** — Combine text, image, audio, sensor, and behavioral embeddings into a single entity representation (the "Embedding Cube") with cross-modal relationship discovery via cosine similarity.
 
-3. **Ground embeddings in theory** — Implement SIGReg, WeakSIGReg, RDMReg, and NormReg from JEPA research published in 2025–2026. These regularizers target embedding shape, sparsity, covariance, and scale without relying on stop-gradients or EMA teachers.
+3. **Ground embeddings in theory** — Implement SIGReg, WeakSIGReg, RDMReg, NormReg, SACReg, and SubSIGReg from JEPA research published in 2025–2026. These regularizers target embedding shape, sparsity, covariance, scale, and spectral health without relying on stop-gradients or EMA teachers.
 
 4. **Stay lightweight and extensible** — Zero dependencies for the core library. PyTorch is optional (only needed for regularizers). Decorator-based plugin system for custom embeddings and models.
 
@@ -182,7 +182,7 @@ print(relationships)  # {laptop.id: [phone.id]}
 
 ## JEPA Regularizers
 
-Event-JEPA-Cube implements four regularizers from recent JEPA research that control embedding distribution, covariance, sparsity, and scale. These require PyTorch.
+Event-JEPA-Cube implements six regularizers from recent JEPA research that control embedding distribution, covariance, sparsity, scale, and spectral health. These require PyTorch.
 
 ### SIGReg — Sketched Isotropic Gaussian Regularization
 
@@ -249,6 +249,30 @@ normreg = NormReg(target_scale=1.0)  # target for ||z||^2 / d
 reg_loss = normreg.compute_loss(embedding_batch)
 ```
 
+### SACReg — Spectral Anti-Collapse Regularization
+
+From [λ-JEPA (arXiv:2609.35288)](https://arxiv.org/abs/2609.35288). Applies mean, covariance-trace, and log-determinant penalties directly to the backbone representation used downstream. This addresses the projector/backbone mismatch: a healthy projected embedding does not guarantee a healthy backbone.
+
+```python
+from event_jepa_cube.regularizers import SACReg
+
+sacreg = SACReg(eps=1e-4)
+backbone_loss = sacreg.compute_loss(backbone_embeddings)
+```
+
+### SubSIGReg — Subspace Gaussian Regularization
+
+From [Sub-JEPA (arXiv:2605.09241)](https://arxiv.org/abs/2605.09241). Applies SIGReg to frozen row-orthonormal subspaces rather than forcing the full latent space to be isotropic. This is useful when task-relevant structure has lower intrinsic dimensionality.
+
+```python
+from event_jepa_cube.regularizers import SubSIGReg
+
+subreg = SubSIGReg(num_subspaces=4, subspace_dim=16)
+subspace_loss = subreg.compute_loss(embeddings)
+```
+
+Use `effective_rank(embeddings)` to compare representation geometries on training and validation data instead of assuming that higher rank is always better.
+
 ### Choosing a Regularizer
 
 | Regularizer | Use When | Complexity | Sparsity |
@@ -257,6 +281,8 @@ reg_loss = normreg.compute_loss(embedding_batch)
 | **WeakSIGReg** | Supervised training stabilization, preventing collapse | O(N * K) | Dense |
 | **RDMReg** | Need sparse/interpretable features (anomaly detection, efficient inference) | O(N * M * log N) | Controllable |
 | **NormReg** | Symmetric/bidirectional prediction (BiJEPA); scale control alongside any of the above | O(N * d) | Dense |
+| **SACReg** | Protecting the backbone used for downstream transfer | O(N * d + d³) | Spectral |
+| **SubSIGReg** | Preserving low intrinsic dimensionality while preventing collapse | O(K * N * M) | Subspace |
 
 ### Bidirectional Training — BiJEPATrainer
 
@@ -356,7 +382,7 @@ event_jepa_cube/
 ├── streaming.py         # Incremental processing and snapshots
 ├── training.py          # V-JEPA cooldown schedule
 ├── numpy_ops.py         # NumPy acceleration with stdlib fallbacks
-├── regularizers.py      # SIGReg, WeakSIGReg, RDMReg, NormReg
+├── regularizers.py      # Six regularizers + effective-rank diagnostics
 ├── predictors.py        # MLP and Transformer predictors
 ├── bijepa.py            # Bidirectional cycle-consistent training
 ├── materializer.py      # DuckDB → temporal event sequences
@@ -415,6 +441,13 @@ mypy event_jepa_cube/ --ignore-missing-imports
 
 CI runs these checks plus the test suite on Python 3.10, 3.11, and 3.12. A separate job installs `.[all]` and runs the complete PyTorch suite.
 
+For a reproducible containerized test environment:
+
+```bash
+docker build -t event-jepa-cube .
+docker run --rm event-jepa-cube
+```
+
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the full development guide and [CHANGELOG.md](CHANGELOG.md) for recent fixes.
 
 ---
@@ -430,6 +463,10 @@ The regularizer implementations are based on the following papers:
 - **Rectified LpJEPA** — Joint-Embedding Predictive Architectures with Sparse and Maximum-Entropy Representations. Generalizes Gaussian JEPAs via RDMReg for controllable sparsity. [arXiv:2602.01456](https://arxiv.org/abs/2602.01456)
 
 - **BiJEPA** — Bi-directional Joint Embedding Predictive Architecture for Symmetric Representation Learning. Adds cycle-consistent bidirectional prediction with representation-norm regularization. [arXiv:2603.00049](https://arxiv.org/abs/2603.00049)
+
+- **λ-JEPA** — Spectral Anti-Collapse Regularization for Self-Supervised Learning. Protects the backbone representation used for downstream transfer. [arXiv:2609.35288](https://arxiv.org/abs/2609.35288)
+
+- **Sub-JEPA** — Subspace Gaussian Regularization for Stable End-to-End World Models. Relaxes full-space isotropy using multiple lower-dimensional Gaussian views. [arXiv:2605.09241](https://arxiv.org/abs/2605.09241)
 
 ## Citation
 

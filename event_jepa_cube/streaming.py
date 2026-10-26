@@ -46,8 +46,15 @@ class StreamingJEPA:
         self._recent_embeddings: deque[list[float]] = deque(maxlen=maxlen)
         self._recent_timestamps: deque[float] = deque(maxlen=maxlen)
 
+    def _validate_event(self, embedding: list[float], timestamp: float) -> None:
+        if len(embedding) != self.embedding_dim:
+            raise ValueError(f"Expected embedding dimension {self.embedding_dim}, got {len(embedding)}")
+        if self._last_timestamp is not None and timestamp < self._last_timestamp:
+            raise ValueError("Streaming timestamps must be non-decreasing")
+
     def update(self, embedding: list[float], timestamp: float) -> list[float]:
         """Process a single new event and return updated representation."""
+        self._validate_event(embedding, timestamp)
         if self._count == 0:
             self._representation = list(embedding)
         else:
@@ -77,8 +84,17 @@ class StreamingJEPA:
         Unlike sequential update(), this uses numpy (when available) to
         vectorize the per-dimension operations within each event.
         """
+        if len(embeddings) != len(timestamps):
+            raise ValueError("Embeddings and timestamps must have the same length")
         if not embeddings:
             return []
+
+        previous_timestamp = self._last_timestamp
+        for embedding, timestamp in zip(embeddings, timestamps):
+            self._validate_event(embedding, timestamp)
+            if previous_timestamp is not None and timestamp < previous_timestamp:
+                raise ValueError("Streaming timestamps must be non-decreasing")
+            previous_timestamp = timestamp
 
         repr_out, last_ts, new_count, new_mean, new_m2 = npo.streaming_ema_batch(
             self._representation,

@@ -152,6 +152,15 @@ class TestBiJEPATraining:
         assert len(history["norm_losses"]) == n
         assert len(history["val_losses"]) == n
 
+    def test_rank_tracking_is_opt_in(self):
+        torch.manual_seed(42)
+        trainer = BiJEPATrainer(_make_predictor(), track_rank=True)
+        history = trainer.train([_make_sequence(20)], epochs=2, patience=2)
+
+        assert len(history["train_effective_ranks"]) == len(history["train_losses"])
+        assert len(history["val_effective_ranks"]) == len(history["val_losses"])
+        assert all(rank > 0.0 for rank in history["val_effective_ranks"])
+
     def test_empty_sequences(self):
         torch.manual_seed(42)
         trainer = BiJEPATrainer(_make_predictor())
@@ -166,5 +175,5 @@ class TestBiJEPAEvaluate:
         torch.manual_seed(42)
         trainer = BiJEPATrainer(_make_predictor())
         metrics = trainer.evaluate([_make_sequence(20)])
-        assert set(metrics) == {"forward_mse", "backward_mse", "cycle_mse", "cosine_similarity"}
+        assert set(metrics) == {"forward_mse", "backward_mse", "cycle_mse", "cosine_similarity", "effective_rank"}
         assert metrics["forward_mse"] > 0.0

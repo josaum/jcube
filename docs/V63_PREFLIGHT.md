@@ -33,8 +33,11 @@ Legacy V6.2 checkpoints still resume: `_clean_state_dict()` strips the old
   truncated at admission time). Applies to the verify script, not the trainer.
 - **Per-rank graph loading:** each DDP rank still loads the 165M-edge table
   independently (~memory-bounded, works in the 200GB container).
-- `onto_projection` is a fixed random projection (never trained; used once at
-  init). Harmless; left as-is.
+
+## Resolved since the original note
+
+- `onto_projection` is included in the optimizer and checkpoints, so the older
+  "fixed random projection" note is resolved.
 
 ## The gate — run in this order, no skipping
 
