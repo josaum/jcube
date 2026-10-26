@@ -315,8 +315,12 @@ class EventJEPA:
             return prediction_loss
 
         n_levels = len(level_embeddings)
+        if n_levels == 0:
+            return prediction_loss
         if level_weights is None:
             level_weights = [1.0 / n_levels] * n_levels
+        elif len(level_weights) != n_levels:
+            raise ValueError("level_weights must have the same length as level_embeddings")
 
         total_reg = 0.0
         for level_embs, w in zip(level_embeddings, level_weights):
