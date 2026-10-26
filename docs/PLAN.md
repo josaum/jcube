@@ -292,7 +292,7 @@ tests/
 ├── test_event_jepa.py       # Temporal processing, pattern detection, prediction
 ├── test_embedding_cube.py   # Similarity computation, threshold behavior, errors
 ├── test_registry.py         # Register/retrieve, name collisions, missing keys
-├── test_regularizers.py     # SIGReg, Weak-SIGReg, RDMReg correctness:
+├── test_regularizers.py     # SIGReg, WeakSIGReg, RDMReg correctness:
 │   ├── test_sigreg_gaussian_embeddings_low_loss
 │   ├── test_sigreg_collapsed_embeddings_high_loss
 │   ├── test_weak_sigreg_identity_covariance
