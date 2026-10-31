@@ -1,6 +1,6 @@
 # Contributing to Event-JEPA-Cube
 
-Event-JEPA-Cube supports Python 3.10–3.12. Use the `.[test]` extra for a complete
+Event-JEPA-Cube supports Python 3.11–3.12. Use the `.[test]` extra for a complete
 local test environment, or `.[all]` when working on PyTorch-dependent features.
 
 ## Development Setup

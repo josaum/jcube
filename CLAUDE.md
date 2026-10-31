@@ -12,7 +12,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Lint: `ruff check .`
 - Format: `ruff format .`
 - Type check: `mypy event_jepa_cube/ --ignore-missing-imports`
-- CI: lint + Python 3.10/3.11/3.12 with `.[test]`, full suite with `.[all]`
+- CI: lint + Python 3.11/3.12 with `.[test]`, full suite with `.[all]`
 - Run digital twin API: `digital-twin --db /path/to/db.duckdb --port 8000`
 - GPU training (Modal): `modal run event_jepa_cube/scale_pipeline_v6.py --action full`
 - Pre-flight before ANY paid training run: `--action smoke`, then the gated order in `docs/V63_PREFLIGHT.md`

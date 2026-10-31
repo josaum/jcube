@@ -6,7 +6,7 @@ Event-JEPA-Cube addresses fundamental limitations of standard Transformer archit
 
 [![CI](https://github.com/josaum/jcube/actions/workflows/ci.yml/badge.svg)](https://github.com/josaum/jcube/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![Tests](https://img.shields.io/badge/tests-420%20passed-brightgreen.svg)](https://github.com/josaum/jcube/actions/workflows/ci.yml)
 
 All code lives under the sovereign namespace: `https://github.com/josaum/jcube`.
@@ -463,7 +463,7 @@ ruff format .
 mypy event_jepa_cube/ --ignore-missing-imports
 ```
 
-CI runs these checks plus the test suite on Python 3.10, 3.11, and 3.12. A separate job installs `.[all]` and runs the complete PyTorch suite.
+CI runs these checks plus the test suite on Python 3.11 and 3.12. A separate job installs `.[all]` and runs the complete PyTorch suite.
 
 For a reproducible containerized test environment:
 
