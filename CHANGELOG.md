@@ -29,6 +29,7 @@
 - Added a complete `.[test]` extra and aligned `.[all]`, CI, and contributor
   setup instructions around it.
 - Made PyArrow and DuckDB required runtime dependencies; Torch remains optional.
+- Raised the minimum Python version to 3.11 because DuckDB 2.0 requires it.
 - Updated project guides, current metrics, probe descriptions, and historical
   document context.
 
