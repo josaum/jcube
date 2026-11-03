@@ -9,11 +9,28 @@ Also provides mmap-backed array storage for large sequences.
 
 from __future__ import annotations
 
-import mmap
 import os
-import struct
 import tempfile
+from pathlib import Path
 from typing import Any, cast
+
+import pyarrow as pa
+
+from .arrow_ipc import (
+    ArrowIpcSharedTensor,
+    batch_cosine_similarity_arrow_ipc,
+    compute_trend_arrow_ipc,
+    ema_state_from_ipc_stream,
+    ema_state_to_ipc_stream,
+    has_rust_arrow_ipc,
+    matrix_from_ipc_stream,
+    matrix_to_ipc_stream,
+    sequence_from_ipc_stream,
+    sequence_to_ipc_stream,
+    streaming_ema_batch_arrow_ipc,
+    vector_from_ipc_stream,
+    weighted_aggregate_arrow_ipc,
+)
 
 try:
     import numpy as np
@@ -55,9 +72,13 @@ def weighted_aggregate(
     timestamps: list[float],
     alpha: float = 1.0,
 ) -> list[float]:
-    """Exponential-decay weighted average across embeddings."""
+    """Exponential-decay weighted average across embeddings (Arrow IPC / Rust accelerated)."""
     if not embeddings:
         return []
+    if has_rust_arrow_ipc():
+        ipc_in = sequence_to_ipc_stream(embeddings, timestamps)
+        ipc_out = weighted_aggregate_arrow_ipc(ipc_in, alpha=alpha)
+        return vector_from_ipc_stream(ipc_out)
     if HAS_NUMPY:
         emb_arr = np.asarray(embeddings, dtype=np.float64)  # (N, D)
         ts_arr = np.asarray(timestamps, dtype=np.float64)  # (N,)
@@ -182,7 +203,11 @@ def compute_trend(
     timestamps: list[float],
     alpha: float = 1.0,
 ) -> list[float]:
-    """Compute exponentially-weighted trend from consecutive deltas."""
+    """Compute exponentially-weighted trend from consecutive deltas (Arrow IPC / Rust accelerated)."""
+    if has_rust_arrow_ipc():
+        ipc_in = sequence_to_ipc_stream(embeddings, timestamps)
+        ipc_out = compute_trend_arrow_ipc(ipc_in, alpha=alpha)
+        return vector_from_ipc_stream(ipc_out)
     if HAS_NUMPY:
         emb_arr = np.asarray(embeddings, dtype=np.float64)  # (N, D)
         ts_arr = np.asarray(timestamps, dtype=np.float64)  # (N,)
@@ -291,10 +316,17 @@ def batch_cosine_similarity(
     matrix_a: list[list[float]],
     matrix_b: list[list[float]],
 ) -> list[list[float]]:
-    """Pairwise cosine similarity between rows of two matrices.
+    """Pairwise cosine similarity between rows of two matrices (Arrow IPC / Rust accelerated).
 
     Returns an (N_a, N_b) similarity matrix.
     """
+    if not matrix_a or not matrix_b:
+        return []
+    if has_rust_arrow_ipc():
+        ipc_a = matrix_to_ipc_stream(matrix_a, field_name="matrix_a")
+        ipc_b = matrix_to_ipc_stream(matrix_b, field_name="matrix_b")
+        ipc_sim = batch_cosine_similarity_arrow_ipc(ipc_a, ipc_b)
+        return matrix_from_ipc_stream(ipc_sim)
     if HAS_NUMPY:
         a = np.asarray(matrix_a, dtype=np.float64)  # (Na, D)
         b = np.asarray(matrix_b, dtype=np.float64)  # (Nb, D)
@@ -336,6 +368,25 @@ def streaming_ema_batch(
     """
     if not embeddings:
         return representation, last_timestamp or 0.0, count, running_mean, running_m2
+
+    if has_rust_arrow_ipc():
+        seq_ipc = sequence_to_ipc_stream(embeddings, timestamps)
+        state_ipc = ema_state_to_ipc_stream(representation, running_mean, running_m2)
+        out_state_ipc, new_last_ts, new_count = streaming_ema_batch_arrow_ipc(
+            seq_ipc,
+            state_ipc_bytes=state_ipc,
+            alpha=alpha,
+            last_ts=last_timestamp,
+            count=count,
+        )
+        new_repr, new_mean, new_m2 = ema_state_from_ipc_stream(out_state_ipc)
+        return (
+            new_repr,
+            float(new_last_ts) if new_last_ts is not None else 0.0,
+            new_count,
+            new_mean,
+            new_m2,
+        )
 
     if HAS_NUMPY:
         emb_arr = np.asarray(embeddings, dtype=np.float64)  # (N, D)
@@ -470,10 +521,11 @@ def apply_offset(
 
 
 class MmapEmbeddingStore:
-    """Memory-mapped storage for large embedding sequences.
+    """Zero-copy Arrow IPC file-backed storage for large embedding sequences.
 
-    Stores embeddings as a flat array of float64 in a temp file,
-    accessible via numpy mmap or fallback file I/O.
+    Stores embeddings inside an uncompressed Apache Arrow IPC file (`.arrow`)
+    via `ArrowIpcSharedTensor`, accessible via zero-copy `memoryview`, `numpy`,
+    or Arrow IPC streams (`to_ipc_bytes` / `from_ipc_bytes` / `to_arrow`).
     """
 
     FLOAT64_SIZE = 8
@@ -482,9 +534,8 @@ class MmapEmbeddingStore:
         self.embedding_dim = embedding_dim
         self._count = 0
         self._capacity = max(capacity, 256)
-        self._fd: int | None = None
-        self._path: str | None = None
-        self._mmap: mmap.mmap | None = None
+        self._path: Path | None = None
+        self._tensor: ArrowIpcSharedTensor | None = None
         self._np_mmap: Any = None
         self._timestamps: list[float] = []
 
@@ -492,28 +543,38 @@ class MmapEmbeddingStore:
             self._allocate(self._capacity)
 
     def _allocate(self, capacity: int) -> None:
-        """Allocate (or grow) the backing file."""
-        byte_size = capacity * self.embedding_dim * self.FLOAT64_SIZE
-        if self._fd is not None:
-            # Grow existing file
-            if self._mmap is not None:
-                self._mmap.close()
-            os.ftruncate(self._fd, byte_size)
-        else:
-            fd, path = tempfile.mkstemp(suffix=".mmap", prefix="jcube_emb_")
-            self._fd = fd
-            self._path = path
-            os.ftruncate(fd, byte_size)
+        """Allocate (or grow) the backing `.arrow` IPC tensor file."""
+        existing_rows: list[list[float]] = []
+        if self._tensor is not None:
+            if self._count > 0:
+                existing_rows = self.get_embeddings(0, self._count)
+            self._np_mmap = None
+            self._tensor.unlink()
+            self._tensor = None
 
-        self._mmap = mmap.mmap(self._fd, byte_size)
+        fd, raw_path = tempfile.mkstemp(suffix=".arrow", prefix="jcube_emb_")
+        os.close(fd)
+        self._path = Path(raw_path)
         self._capacity = capacity
+        self._tensor = ArrowIpcSharedTensor(
+            self._path,
+            (capacity, self.embedding_dim),
+            dtype="float64",
+            create=True,
+        )
 
         if HAS_NUMPY:
             self._np_mmap = np.ndarray(
                 (capacity, self.embedding_dim),
                 dtype=np.float64,
-                buffer=self._mmap,
+                buffer=self._tensor._typed_view,
             )
+
+        if existing_rows:
+            if HAS_NUMPY and self._np_mmap is not None:
+                self._np_mmap[: len(existing_rows)] = existing_rows
+            else:
+                self._tensor.view[: len(existing_rows)] = existing_rows
 
     def _ensure_capacity(self, needed: int) -> None:
         if needed > self._capacity:
@@ -525,10 +586,8 @@ class MmapEmbeddingStore:
         self._ensure_capacity(self._count + 1)
         if HAS_NUMPY and self._np_mmap is not None:
             self._np_mmap[self._count] = embedding
-        else:
-            offset = self._count * self.embedding_dim * self.FLOAT64_SIZE
-            data = struct.pack(f"{self.embedding_dim}d", *embedding)
-            self._mmap[offset : offset + len(data)] = data  # type: ignore[index]
+        elif self._tensor is not None:
+            self._tensor.view[self._count] = embedding
         self._timestamps.append(timestamp)
         self._count += 1
 
@@ -540,14 +599,8 @@ class MmapEmbeddingStore:
         self._ensure_capacity(self._count + n)
         if HAS_NUMPY and self._np_mmap is not None:
             self._np_mmap[self._count : self._count + n] = embeddings
-        else:
-            for emb in embeddings:
-                offset = self._count * self.embedding_dim * self.FLOAT64_SIZE
-                data = struct.pack(f"{self.embedding_dim}d", *emb)
-                self._mmap[offset : offset + len(data)] = data  # type: ignore[index]
-                self._count += 1
-            self._timestamps.extend(timestamps)
-            return
+        elif self._tensor is not None:
+            self._tensor.view[self._count : self._count + n] = embeddings
         self._timestamps.extend(timestamps)
         self._count += n
 
@@ -560,13 +613,9 @@ class MmapEmbeddingStore:
             return []
         if HAS_NUMPY and self._np_mmap is not None:
             return cast(list[list[float]], self._np_mmap[start:end].tolist())
-        result = []
-        for i in range(start, end):
-            offset = i * self.embedding_dim * self.FLOAT64_SIZE
-            data = self._mmap[offset : offset + self.embedding_dim * self.FLOAT64_SIZE]  # type: ignore[index]
-            row = list(struct.unpack(f"{self.embedding_dim}d", data))
-            result.append(row)
-        return result
+        if self._tensor is not None:
+            return cast(list[list[float]], self._tensor.view[start:end].tolist())
+        return []
 
     def get_numpy(self, start: int = 0, end: int | None = None) -> object:
         """Return numpy view of stored embeddings (zero-copy if numpy available)."""
@@ -582,29 +631,49 @@ class MmapEmbeddingStore:
             end = self._count
         return self._timestamps[start:end]
 
+    def to_ipc_bytes(self, start: int = 0, end: int | None = None) -> bytes:
+        """Serialize stored `(timestamps, embeddings)` slice as an Arrow IPC stream."""
+        embs = self.get_embeddings(start, end)
+        ts = self.get_timestamps(start, end)
+        return sequence_to_ipc_stream(embs, ts)
+
+    def to_arrow(self, start: int = 0, end: int | None = None) -> pa.Table:
+        """Return stored `(timestamps, embeddings)` slice as a `pyarrow.Table`."""
+        ipc_bytes = self.to_ipc_bytes(start, end)
+        return cast(pa.Table, pa.ipc.open_stream(pa.py_buffer(ipc_bytes)).read_all())
+
+    @classmethod
+    def from_ipc_bytes(cls, ipc_bytes: bytes) -> MmapEmbeddingStore:
+        """Construct an `MmapEmbeddingStore` from an Arrow IPC sequence stream or file."""
+        embs, ts = sequence_from_ipc_stream(ipc_bytes)
+        dim = len(embs[0]) if embs else 0
+        store = cls(embedding_dim=dim, capacity=max(len(embs), 16))
+        if embs:
+            store.append_batch(embs, ts)
+        return store
+
     @property
     def count(self) -> int:
         return self._count
+
+    @property
+    def path(self) -> Path | None:
+        return self._path
 
     def clear(self) -> None:
         self._count = 0
         self._timestamps.clear()
 
     def close(self) -> None:
-        """Release resources."""
-        if self._mmap is not None:
-            self._mmap.close()
-            self._mmap = None
+        """Release resources and remove the temporary `.arrow` file."""
         self._np_mmap = None
-        if self._fd is not None:
-            os.close(self._fd)
-            self._fd = None
-        if self._path is not None:
+        if self._tensor is not None:
             try:
-                os.unlink(self._path)
+                self._tensor.unlink()
             except OSError:
                 pass
-            self._path = None
+            self._tensor = None
+        self._path = None
 
     def __del__(self) -> None:
         self.close()

@@ -4,6 +4,10 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.so
+*.dylib
+*.dll
+target/
+rust/target/
 dist/
 build/
 *.egg-info/

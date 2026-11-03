@@ -2,21 +2,15 @@
 
 from __future__ import annotations
 
-import os
 import re
 import tempfile
 from pathlib import Path
 from typing import Any
 
+import pyarrow as pa
+
+from .arrow_ipc import ArrowIpcSharedTensor, ArrowIpcTensorView
 from .sequence import EventSequence
-
-try:
-    import numpy as np
-
-    _HAS_NUMPY = True
-except ImportError:  # pragma: no cover
-    np = None  # type: ignore[assignment]
-    _HAS_NUMPY = False
 
 
 def truncate_sequence_at_time(sequence: EventSequence, cutoff: float, *, inclusive: bool = True) -> EventSequence:
@@ -60,48 +54,68 @@ def temporal_probe_split(
 
 
 class SharedGraphStore:
-    """File-backed graph array shared by independent DDP worker processes.
+    """Zero-copy Arrow IPC file-backed graph tensor shared across DDP worker processes.
 
-    Rank 0 creates and populates the store; other ranks attach by name and see
-    the same physical pages instead of deserializing separate graph copies.
-    The default location is the operating system's shared temporary directory.
+    Rank 0 creates and populates the uncompressed `.arrow` IPC file; other ranks
+    attach by name and map the same physical Arrow data buffer pages in-place
+    without deserializing separate graph copies or requiring `numpy`.
     """
 
     def __init__(self, name: str, shape: tuple[int, ...], dtype: str = "int64", *, create: bool = False) -> None:
-        if not _HAS_NUMPY:
-            raise ImportError("numpy is required for SharedGraphStore")
         if not re.fullmatch(r"[A-Za-z0-9_.-]+", name):
             raise ValueError("name must contain only letters, numbers, dots, underscores, and hyphens")
         if not shape or any(size <= 0 for size in shape):
             raise ValueError("shape must contain positive dimensions")
 
         self.name = name
-        self.shape = shape
+        self.shape = tuple(int(d) for d in shape)
         self.dtype = dtype
-        self.path = Path(tempfile.gettempdir()) / f"jcube_graph_{name}.npy"
-        self._array: Any
-        if create:
-            self._array = np.memmap(self.path, mode="w+", dtype=dtype, shape=shape)
-        else:
-            if not self.path.exists():
-                raise FileNotFoundError(f"Shared graph does not exist: {self.path}")
-            self._array = np.memmap(self.path, mode="r+", dtype=dtype, shape=shape)
+        self.path = Path(tempfile.gettempdir()) / f"jcube_graph_{name}.arrow"
+        if not create and not self.path.exists():
+            raise FileNotFoundError(f"Shared graph does not exist: {self.path}")
+        self._tensor: ArrowIpcSharedTensor | None = ArrowIpcSharedTensor(
+            self.path,
+            self.shape,
+            dtype=dtype,
+            create=create,
+        )
 
     @property
-    def edges(self) -> Any:
-        """Return the shared array view; mutations are visible to every rank."""
-        return self._array
+    def edges(self) -> ArrowIpcTensorView:
+        """Return the zero-copy shared Arrow IPC tensor view; mutations are visible to every rank."""
+        if self._tensor is None:
+            raise RuntimeError("SharedGraphStore is closed")
+        return self._tensor.view
+
+    def flush(self) -> None:
+        """Flush dirty memory-mapped pages to the underlying `.arrow` IPC file."""
+        if self._tensor is not None:
+            self._tensor.flush()
+
+    def read_arrow(self) -> pa.Table:
+        """Read the backing `.arrow` file zero-copy as a `pyarrow.Table`."""
+        if self._tensor is None:
+            raise RuntimeError("SharedGraphStore is closed")
+        return self._tensor.read_arrow()
+
+    def to_ipc_bytes(self) -> bytes:
+        """Return the raw `.arrow` IPC file bytes."""
+        if self._tensor is None:
+            raise RuntimeError("SharedGraphStore is closed")
+        return self._tensor.to_ipc_bytes()
 
     def close(self) -> None:
         """Flush and release this rank's view without deleting shared data."""
-        self._array.flush()
-        self._array = None
+        if self._tensor is not None:
+            self._tensor.flush()
+            self._tensor.close()
+            self._tensor = None
 
     def unlink(self) -> None:
-        """Close views and remove the backing file (called by the owner only)."""
+        """Close views and remove the backing `.arrow` file (called by the owner only)."""
         self.close()
         if self.path.exists():
-            os.unlink(self.path)
+            self.path.unlink()
 
     def __enter__(self) -> SharedGraphStore:
         return self

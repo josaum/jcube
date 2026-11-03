@@ -1,0 +1,24 @@
+[package]
+name = "jcube-arrow-ipc"
+version = "0.3.0"
+edition = "2021"
+description = "Low-level Arrow IPC storage and compute kernels for Event-JEPA-Cube"
+license = "MIT"
+
+[lib]
+name = "jcube_arrow_ipc"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+arrow-array = "=58.3.0"
+arrow-buffer = "=58.3.0"
+arrow-ipc = { version = "=58.3.0", features = ["lz4", "zstd"] }
+arrow-schema = "=58.3.0"
+memmap2 = "0.9"
+rayon = "1.10"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4
+strip = true
