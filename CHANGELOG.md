@@ -14,6 +14,16 @@
   invalid search parameters.
 - Multilevel loss handles empty levels and mismatched weights safely; streaming
   validates dimensions and timestamp order without partial state mutation.
+- Fixed variable shadowing in `twin_api._load_embeddings`, pushed single-entity
+  filtering (`entity_ids=[entity_id]`) down to SQL in `/twin/entity/{entity_type}/{entity_id}`,
+  enabled `:path` matching for V4 slash-delimited `node_id` routes in `/twin/similar`,
+  and guarded `np.argpartition` / `.reshape(-1)` against 0-D and `k >= N` edge cases.
+- Parameterized `TriggerEngine` sequence history and alert queries via
+  `DuckDBConnector.load_sequences(..., params=...)` and escaped SQL string filters
+  in `Materializer.materialize()`.
+- Enabled strict `mypy` type checking across `numpy_ops`, `predictors`, and
+  `regularizers` (removing `ignore_errors = true` overrides) and enabled
+  `test_scale_pipeline_v6.py` in Modal-free environments via `_install_modal_stub()`.
 
 ### Added
 - `SACReg` for backbone spectral anti-collapse regularization and `SubSIGReg`

@@ -13,6 +13,7 @@ import mmap
 import os
 import struct
 import tempfile
+from typing import Any, cast
 
 try:
     import numpy as np
@@ -30,18 +31,18 @@ except ImportError:  # pragma: no cover
 # The public API still accepts/returns List[float] for compatibility.
 
 
-def to_array(data: list | object) -> object:
+def to_array(data: list[Any] | object) -> object:
     """Convert list(s) to ndarray if numpy is available, else passthrough."""
     if HAS_NUMPY:
         return np.asarray(data, dtype=np.float64)
     return data
 
 
-def to_list(data: object) -> list:
+def to_list(data: Any) -> list[Any]:
     """Convert ndarray back to nested Python list."""
     if HAS_NUMPY and isinstance(data, np.ndarray):
-        return data.tolist()
-    return list(data)  # type: ignore[arg-type]
+        return cast(list[Any], data.tolist())
+    return list(data)
 
 
 # -----------------------------------------------------------------------
@@ -58,15 +59,15 @@ def weighted_aggregate(
     if not embeddings:
         return []
     if HAS_NUMPY:
-        emb = np.asarray(embeddings, dtype=np.float64)  # (N, D)
-        ts = np.asarray(timestamps, dtype=np.float64)  # (N,)
-        t_max = ts.max()
-        weights = np.exp(-alpha * (t_max - ts))  # (N,)
-        total_w = weights.sum()
-        if total_w == 0.0:
-            total_w = 1.0
-        agg = (weights[:, None] * emb).sum(axis=0) / total_w  # (D,)
-        return agg.tolist()
+        emb_arr = np.asarray(embeddings, dtype=np.float64)  # (N, D)
+        ts_arr = np.asarray(timestamps, dtype=np.float64)  # (N,)
+        t_max_np = float(ts_arr.max())
+        weights_arr = np.exp(-alpha * (t_max_np - ts_arr))  # (N,)
+        total_w_np = float(weights_arr.sum())
+        if total_w_np == 0.0:
+            total_w_np = 1.0
+        agg_arr = (weights_arr[:, None] * emb_arr).sum(axis=0) / total_w_np  # (D,)
+        return cast(list[float], agg_arr.tolist())
     # Fallback: pure Python
     import math
 
@@ -97,7 +98,7 @@ def fuse_multilevel(level_representations: list[list[float]]) -> list[float]:
         return []
     if HAS_NUMPY:
         arr = np.asarray(non_empty, dtype=np.float64)
-        return arr.mean(axis=0).tolist()
+        return cast(list[float], arr.mean(axis=0).tolist())
     dim = len(non_empty[0])
     n = len(non_empty)
     fused = [0.0] * dim
@@ -121,7 +122,7 @@ def compute_temporal_distances(
         ct = np.asarray(context_timestamps, dtype=np.float64)[:, None]  # (C, 1)
         mt = np.asarray(mask_timestamps, dtype=np.float64)[None, :]  # (1, M)
         dists = np.abs(ct - mt).min(axis=1)  # (C,)
-        return dists.tolist()
+        return cast(list[float], dists.tolist())
     distances: list[float] = []
     for c in context_timestamps:
         min_dist = min((abs(c - m) for m in mask_timestamps), default=0.0)
@@ -143,16 +144,16 @@ def dense_context_loss(
     actually controls the strength of the context supervision.
     """
     if HAS_NUMPY:
-        pred = np.asarray(context_embeddings, dtype=np.float64)  # (C, D)
-        tgt = np.asarray(target_embeddings, dtype=np.float64)  # (C, D)
-        d = np.asarray(distances, dtype=np.float64)  # (C,)
-        d = np.maximum(d, distance_floor)
-        weights = 1.0 / np.sqrt(d)  # (C,)
-        token_loss = np.abs(pred - tgt).mean(axis=1)  # (C,)
-        total_weight = weights.sum()
-        if total_weight == 0.0 or lambda_coeff == 0.0:
+        pred_arr = np.asarray(context_embeddings, dtype=np.float64)  # (C, D)
+        tgt_arr = np.asarray(target_embeddings, dtype=np.float64)  # (C, D)
+        d_arr = np.asarray(distances, dtype=np.float64)  # (C,)
+        d_arr = np.maximum(d_arr, distance_floor)
+        weights_arr = 1.0 / np.sqrt(d_arr)  # (C,)
+        token_loss_arr = np.abs(pred_arr - tgt_arr).mean(axis=1)  # (C,)
+        total_weight_np = float(weights_arr.sum())
+        if total_weight_np == 0.0 or lambda_coeff == 0.0:
             return 0.0
-        weighted_mean = (weights * token_loss).sum() / total_weight
+        weighted_mean = float((weights_arr * token_loss_arr).sum()) / total_weight_np
         return float(lambda_coeff * weighted_mean)
     # Fallback
     import math
@@ -183,23 +184,23 @@ def compute_trend(
 ) -> list[float]:
     """Compute exponentially-weighted trend from consecutive deltas."""
     if HAS_NUMPY:
-        emb = np.asarray(embeddings, dtype=np.float64)  # (N, D)
-        ts = np.asarray(timestamps, dtype=np.float64)  # (N,)
-        deltas = np.diff(emb, axis=0)  # (N-1, D)
-        delta_times = ts[1:]  # (N-1,)
-        t_max = delta_times.max()
-        weights = np.exp(-alpha * (t_max - delta_times))  # (N-1,)
-        total_w = weights.sum()
-        if total_w == 0.0:
-            total_w = 1.0
-        trend = (weights[:, None] * deltas).sum(axis=0) / total_w  # (D,)
-        return trend.tolist()
+        emb_arr = np.asarray(embeddings, dtype=np.float64)  # (N, D)
+        ts_arr = np.asarray(timestamps, dtype=np.float64)  # (N,)
+        deltas_arr = np.diff(emb_arr, axis=0)  # (N-1, D)
+        delta_times_arr = ts_arr[1:]  # (N-1,)
+        t_max_np = float(delta_times_arr.max())
+        weights_arr = np.exp(-alpha * (t_max_np - delta_times_arr))  # (N-1,)
+        total_w_np = float(weights_arr.sum())
+        if total_w_np == 0.0:
+            total_w_np = 1.0
+        trend_arr = (weights_arr[:, None] * deltas_arr).sum(axis=0) / total_w_np  # (D,)
+        return cast(list[float], trend_arr.tolist())
     # Fallback
     import math
 
     dim = len(embeddings[0])
-    deltas = []
-    delta_times = []
+    deltas: list[list[float]] = []
+    delta_times: list[float] = []
     for j in range(1, len(embeddings)):
         delta = [embeddings[j][d] - embeddings[j - 1][d] for d in range(dim)]
         deltas.append(delta)
@@ -223,7 +224,7 @@ def extrapolate(last: list[float], trend: list[float], num_steps: int) -> list[l
         trend_arr = np.asarray(trend, dtype=np.float64)  # (D,)
         steps = np.arange(1, num_steps + 1, dtype=np.float64)[:, None]  # (S, 1)
         preds = last_arr[None, :] + trend_arr[None, :] * steps  # (S, D)
-        return preds.tolist()
+        return cast(list[list[float]], preds.tolist())
     dim = len(last)
     predictions = []
     for step in range(1, num_steps + 1):
@@ -248,8 +249,8 @@ def temporal_position_encoding(timestamp: float, dim: int) -> list[float]:
             (indices - 1) / dim,
         )
         angles = timestamp / (10000.0**freqs)
-        encoding = np.where(indices % 2 == 0, np.sin(angles), np.cos(angles))
-        return encoding.tolist()
+        enc_arr = np.where(indices % 2 == 0, np.sin(angles), np.cos(angles))
+        return cast(list[float], enc_arr.tolist())
     import math
 
     encoding = [0.0] * dim
@@ -305,7 +306,7 @@ def batch_cosine_similarity(
         a_normed = a / norms_a
         b_normed = b / norms_b
         sim = a_normed @ b_normed.T  # (Na, Nb)
-        return sim.tolist()
+        return cast(list[list[float]], sim.tolist())
     # Fallback: O(Na * Nb * D)
     result = []
     for row_a in matrix_a:
@@ -337,8 +338,8 @@ def streaming_ema_batch(
         return representation, last_timestamp or 0.0, count, running_mean, running_m2
 
     if HAS_NUMPY:
-        emb = np.asarray(embeddings, dtype=np.float64)  # (N, D)
-        ts = np.asarray(timestamps, dtype=np.float64)  # (N,)
+        emb_arr = np.asarray(embeddings, dtype=np.float64)  # (N, D)
+        ts_arr = np.asarray(timestamps, dtype=np.float64)  # (N,)
         n = len(timestamps)
 
         repr_arr = np.asarray(representation, dtype=np.float64)  # (D,)
@@ -349,30 +350,30 @@ def streaming_ema_batch(
         prev_ts = last_timestamp
 
         for i in range(n):
-            e = emb[i]
-            t = ts[i]
+            e_row = emb_arr[i]
+            t_val = float(ts_arr[i])
             if current_count == 0:
-                repr_arr = e.copy()
+                repr_arr = e_row.copy()
             else:
-                dt = t - prev_ts if prev_ts is not None else 0.0
-                decay = np.exp(-alpha * dt)
-                repr_arr = decay * repr_arr + (1.0 - decay) * e
+                dt = t_val - prev_ts if prev_ts is not None else 0.0
+                decay = float(np.exp(-alpha * dt))
+                repr_arr = decay * repr_arr + (1.0 - decay) * e_row
 
             current_count += 1
-            prev_ts = float(t)
+            prev_ts = t_val
 
             # Welford update (vectorized per-event)
-            delta = e - mean_arr
-            mean_arr = mean_arr + delta / current_count
-            delta2 = e - mean_arr
-            m2_arr = m2_arr + delta * delta2
+            delta_arr = e_row - mean_arr
+            mean_arr = mean_arr + delta_arr / current_count
+            delta2_arr = e_row - mean_arr
+            m2_arr = m2_arr + delta_arr * delta2_arr
 
         return (
-            repr_arr.tolist(),
-            float(prev_ts),
+            cast(list[float], repr_arr.tolist()),
+            float(prev_ts) if prev_ts is not None else 0.0,
             current_count,
-            mean_arr.tolist(),
-            m2_arr.tolist(),
+            cast(list[float], mean_arr.tolist()),
+            cast(list[float], m2_arr.tolist()),
         )
 
     # Fallback: pure Python
@@ -402,7 +403,7 @@ def streaming_ema_batch(
             delta2 = emb_item[d] - mean_list[d]
             m2_list[d] += delta * delta2
 
-    return repr_list, prev_ts, current_count, mean_list, m2_list
+    return repr_list, prev_ts if prev_ts is not None else 0.0, current_count, mean_list, m2_list
 
 
 # -----------------------------------------------------------------------
@@ -421,16 +422,16 @@ def detect_patterns_zscore(
 
     if HAS_NUMPY:
         vals = np.asarray(values, dtype=np.float64)
-        mean = vals.mean()
-        std = vals.std()  # population std
-        if std == 0.0:
+        mean_np = float(vals.mean())
+        std_np = float(vals.std())  # population std
+        if std_np == 0.0:
             return list(range(min(fallback_k, len(values))))
-        z = np.abs((vals - mean) / std)
-        salient = np.where(z > z_threshold)[0].tolist()
-        if len(salient) < 2:
-            sorted_idx = np.argsort(-np.abs(vals))[: min(fallback_k, len(values))]
-            return sorted_idx.tolist()
-        return sorted(salient)
+        z_arr = np.abs((vals - mean_np) / std_np)
+        salient_np = cast(list[int], np.where(z_arr > z_threshold)[0].tolist())
+        if len(salient_np) < 2:
+            sorted_idx_arr = np.argsort(-np.abs(vals))[: min(fallback_k, len(values))]
+            return cast(list[int], sorted_idx_arr.tolist())
+        return sorted(salient_np)
 
     import statistics
 
@@ -457,9 +458,9 @@ def apply_offset(
 ) -> list[list[float]]:
     """Add offset vector to each embedding."""
     if HAS_NUMPY:
-        emb = np.asarray(embeddings, dtype=np.float64)
-        off = np.asarray(offset, dtype=np.float64)
-        return (emb + off).tolist()
+        emb_arr = np.asarray(embeddings, dtype=np.float64)
+        off_arr = np.asarray(offset, dtype=np.float64)
+        return cast(list[list[float]], (emb_arr + off_arr).tolist())
     return [[v + o for v, o in zip(emb, offset)] for emb in embeddings]
 
 
@@ -484,7 +485,7 @@ class MmapEmbeddingStore:
         self._fd: int | None = None
         self._path: str | None = None
         self._mmap: mmap.mmap | None = None
-        self._np_mmap: object | None = None
+        self._np_mmap: Any = None
         self._timestamps: list[float] = []
 
         if embedding_dim > 0:
@@ -558,7 +559,7 @@ class MmapEmbeddingStore:
         if start >= end:
             return []
         if HAS_NUMPY and self._np_mmap is not None:
-            return self._np_mmap[start:end].tolist()
+            return cast(list[list[float]], self._np_mmap[start:end].tolist())
         result = []
         for i in range(start, end):
             offset = i * self.embedding_dim * self.FLOAT64_SIZE

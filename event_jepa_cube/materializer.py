@@ -547,7 +547,8 @@ class Materializer:
                 safe_eid = f'"{tt.entity_column}"'
                 where = f"WHERE {safe_eid} IS NOT NULL"
                 if source_db_filter:
-                    where += f" AND source_db = '{source_db_filter}'"
+                    escaped_src = source_db_filter.replace("'", "''")
+                    where += f" AND source_db = '{escaped_src}'"
                 count_parts.append(
                     f"SELECT CAST({safe_eid} AS VARCHAR) AS eid, COUNT(*) AS cnt "
                     f"FROM {safe_tbl} {where} GROUP BY {safe_eid}"
@@ -585,11 +586,12 @@ class Materializer:
 
             where_parts = [f"{safe_eid} IS NOT NULL", f"{safe_ts} IS NOT NULL"]
             if source_db_filter:
-                where_parts.append(f"source_db = '{source_db_filter}'")
+                escaped_src = source_db_filter.replace("'", "''")
+                where_parts.append(f"source_db = '{escaped_src}'")
 
             # Push entity filter into SQL for massive speedup
             if target_ids is not None and len(target_ids) <= 500:
-                id_list = ", ".join(f"'{eid}'" for eid in target_ids)
+                id_list = ", ".join("'" + eid.replace("'", "''") + "'" for eid in target_ids)
                 where_parts.append(f"CAST({safe_eid} AS VARCHAR) IN ({id_list})")
 
             where = "WHERE " + " AND ".join(where_parts)

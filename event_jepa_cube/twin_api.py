@@ -257,13 +257,13 @@ def _load_embeddings(
     del table, all_nodes, unique_nodes
 
     print(f"Loading weights from {wp}...")
-    state = torch.load(wp, map_location="cpu", weights_only=True)
-    if isinstance(state, torch.Tensor):
-        embeddings = state.float().numpy()
-    elif isinstance(state, dict) and "weight" in state:
-        embeddings = state["weight"].float().numpy()
+    weights_obj = torch.load(wp, map_location="cpu", weights_only=True)
+    if isinstance(weights_obj, torch.Tensor):
+        embeddings = weights_obj.float().numpy()
+    elif isinstance(weights_obj, dict) and "weight" in weights_obj:
+        embeddings = weights_obj["weight"].float().numpy()
     else:
-        embeddings = list(state.values())[0].float().numpy()
+        embeddings = list(weights_obj.values())[0].float().numpy()
 
     if len(node_names) != embeddings.shape[0]:
         print(f"WARNING: {len(node_names)} names vs {embeddings.shape[0]} vectors — truncating")
@@ -856,6 +856,7 @@ async def get_entity_timeline(
             entity_type,
             limit_entities=None,
             limit_events_per_entity=10000,
+            entity_ids=[entity_id],
         ),
     )
 
@@ -908,7 +909,7 @@ async def embedding_info() -> dict[str, Any]:
     }
 
 
-@app.get("/twin/similar/{node_id}")
+@app.get("/twin/similar/{node_id:path}")
 async def find_similar(
     node_id: str,
     k: int = Query(default=5, ge=1, le=500),
@@ -946,11 +947,14 @@ async def find_similar(
         candidate_vecs = embeddings
 
     nc = np.linalg.norm(candidate_vecs, axis=1).clip(min=1e-8)
-    sims = (candidate_vecs @ query_vec.T).squeeze() / (nc * nq)
+    sims = (candidate_vecs @ query_vec.T).reshape(-1) / (nc * nq)
 
     top_k = min(k + 1, len(sims))
-    top_indices = np.argpartition(-sims, top_k)[:top_k]
-    top_indices = top_indices[np.argsort(-sims[top_indices])]
+    if top_k < len(sims):
+        top_indices = np.argpartition(-sims, top_k - 1)[:top_k]
+        top_indices = top_indices[np.argsort(-sims[top_indices])]
+    else:
+        top_indices = np.argsort(-sims)[:top_k]
 
     matches = []
     for i in top_indices:
@@ -998,8 +1002,11 @@ async def find_anomalies(
     std_d = float(max(dists.std(), 1e-8))
 
     top_n = min(top, len(dists))
-    top_indices = np.argpartition(-dists, top_n)[:top_n]
-    top_indices = top_indices[np.argsort(-dists[top_indices])]
+    if top_n < len(dists):
+        top_indices = np.argpartition(-dists, top_n - 1)[:top_n]
+        top_indices = top_indices[np.argsort(-dists[top_indices])]
+    else:
+        top_indices = np.argsort(-dists)[:top_n]
 
     results = [
         {
@@ -1052,11 +1059,14 @@ async def search_by_vector(req: VectorSearchRequest) -> dict[str, Any]:
         candidate_vecs = embeddings
 
     nc = np.linalg.norm(candidate_vecs, axis=1).clip(min=1e-8)
-    sims = (candidate_vecs @ query_vec.T).squeeze() / (nc * nq)
+    sims = (candidate_vecs @ query_vec.T).reshape(-1) / (nc * nq)
 
     top_k = min(req.k, len(sims))
-    top_indices = np.argpartition(-sims, top_k)[:top_k]
-    top_indices = top_indices[np.argsort(-sims[top_indices])]
+    if top_k < len(sims):
+        top_indices = np.argpartition(-sims, top_k - 1)[:top_k]
+        top_indices = top_indices[np.argsort(-sims[top_indices])]
+    else:
+        top_indices = np.argsort(-sims)[:top_k]
 
     matches = [
         {
@@ -1086,7 +1096,7 @@ async def _search_vector_alias(request: dict[str, Any]) -> dict[str, Any]:
 # These MUST be declared before the catch-all /twin/embedding/{node_id:path} below.
 
 
-@app.get("/twin/embedding/similar/{node_id}")
+@app.get("/twin/embedding/similar/{node_id:path}")
 async def _find_similar_alias(
     node_id: str,
     k: int = Query(default=10, ge=1, le=100),
@@ -1106,7 +1116,7 @@ async def _find_anomalies_alias(
     return await find_anomalies(entity_type, top=top, source_db=source_db)
 
 
-@app.get("/twin/embedding/vector/{node_id}")
+@app.get("/twin/embedding/vector/{node_id:path}")
 async def _get_vector_alias(node_id: str) -> dict[str, Any]:
     """Legacy alias for GET /twin/embedding/{node_id}."""
     return await get_embedding(node_id)
