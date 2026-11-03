@@ -9,7 +9,7 @@ Requires PyTorch. Install with: pip install event-jepa-cube[torch]
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 import torch
 import torch.nn as nn
@@ -165,7 +165,7 @@ class MLPPredictor(nn.Module):
             return predictions
 
         out = self.forward(context_tensor)
-        return out[0].tolist()
+        return cast(list[list[float]], out[0].tolist())
 
 
 class TransformerPredictor(nn.Module):
@@ -290,7 +290,7 @@ class TransformerPredictor(nn.Module):
             return predictions
 
         out = self.forward(context_tensor)
-        return out[0].tolist()
+        return cast(list[list[float]], out[0].tolist())
 
 
 class PredictorTrainer:
