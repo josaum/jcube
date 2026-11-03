@@ -339,8 +339,12 @@ class TriggerEngine:
             # Load full sequence history for this sequence_id
             cmap_full = {**{"sequence_id": "sequence_id"}, **(self._column_map or {})}
             sid_col = _validate_identifier(cmap_full["sequence_id"])
-            full_query = f"SELECT * FROM {safe_table} WHERE {sid_col} = '{sid}'"
-            full_sequences = self._connector.load_sequences(query=full_query, column_map=self._column_map)
+            full_query = f"SELECT * FROM {safe_table} WHERE {sid_col} = $1"
+            full_sequences = self._connector.load_sequences(
+                query=full_query,
+                params=[sid],
+                column_map=self._column_map,
+            )
 
             if sid not in full_sequences:
                 continue
@@ -440,7 +444,10 @@ class TriggerEngine:
                 [sequence_id, limit],
             ).fetchall()
         else:
-            rows = conn.execute(f"SELECT * FROM {alerts_t} ORDER BY fired_at DESC LIMIT {limit}").fetchall()
+            rows = conn.execute(
+                f"SELECT * FROM {alerts_t} ORDER BY fired_at DESC LIMIT $1",
+                [limit],
+            ).fetchall()
         cols = ["alert_id", "sequence_id", "rule_name", "severity", "message", "fired_at", "pipeline_result"]
         return [dict(zip(cols, row)) for row in rows]
 

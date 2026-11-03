@@ -66,8 +66,8 @@ class SIGReg:
     def _sample_directions(self, dim: int, device: torch.device) -> Tensor:
         """Sample M random unit-norm directions from the unit hypersphere."""
         directions = torch.randn(dim, self.num_directions, device=device)
-        directions = directions / directions.norm(dim=0, keepdim=True)
-        return directions
+        normed: Tensor = directions / directions.norm(dim=0, keepdim=True)
+        return normed
 
     def _epps_pulley(self, samples: Tensor) -> Tensor:
         """Compute Epps-Pulley statistic comparing samples to N(0,1).
@@ -85,7 +85,6 @@ class SIGReg:
             self.num_quadrature_points,
             device=samples.device,
         )
-        t_points[1] - t_points[0]
 
         # Empirical CF: phi_hat(t) = (1/N) sum_j exp(i*t*x_j)
         # samples: (N,), t_points: (T,) -> outer product: (N, T)
@@ -199,7 +198,7 @@ class WeakSIGReg:
         target = s @ s.t()
 
         # Frobenius norm of difference
-        loss = torch.norm(cov_sketch - target, p="fro") ** 2
+        loss: Tensor = torch.norm(cov_sketch - target, p="fro") ** 2
 
         return loss
 
@@ -362,11 +361,11 @@ def effective_rank(embeddings: Tensor) -> Tensor:
     centered = embeddings - embeddings.mean(dim=0, keepdim=True)
     covariance = (centered.t() @ centered) / float(n)
     eigenvalues = torch.linalg.eigvalsh(covariance).clamp(min=0.0)
-    total = eigenvalues.sum()
+    total: Tensor = eigenvalues.sum()
     if total.item() <= 0.0:
         return total
     probabilities = eigenvalues / total
-    entropy = -(probabilities * probabilities.clamp_min(1e-12).log()).sum()
+    entropy: Tensor = -(probabilities * probabilities.clamp_min(1e-12).log()).sum()
     return entropy.exp()
 
 
@@ -399,7 +398,8 @@ class SACReg:
         covariance = (centered.t() @ centered) / float(n)
         stabilized = covariance + self.eps * torch.eye(d, device=embeddings.device, dtype=embeddings.dtype)
         _, logabsdet = torch.linalg.slogdet(stabilized)
-        return 0.5 * (mean.pow(2).sum() + torch.trace(covariance) - logabsdet - float(d))
+        loss: Tensor = 0.5 * (mean.pow(2).sum() + torch.trace(covariance) - logabsdet - float(d))
+        return loss
 
 
 class SubSIGReg:
@@ -522,4 +522,5 @@ class CorrelatedSIGReg:
         covariance = (centered.t() @ centered) / float(n)
         target = torch.full((d, d), self.rho, device=embeddings.device, dtype=embeddings.dtype)
         target.fill_diagonal_(1.0)
-        return torch.norm(covariance - target, p="fro") ** 2
+        loss: Tensor = torch.norm(covariance - target, p="fro") ** 2
+        return loss

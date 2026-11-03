@@ -109,11 +109,3 @@ module = [
     "torch_geometric.*",
 ]
 ignore_missing_imports = true
-
-[[tool.mypy.overrides]]
-module = [
-    "event_jepa_cube.numpy_ops",
-    "event_jepa_cube.predictors",
-    "event_jepa_cube.regularizers",
-]
-ignore_errors = true

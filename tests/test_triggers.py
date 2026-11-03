@@ -252,6 +252,19 @@ class TestPollOnce:
         alerts = engine.poll_once()  # no new data
         assert alerts == []
 
+    def test_poll_handles_sequence_id_with_quotes(self, engine, connector):
+        engine.add_rule(AlertRule(name="quote_rule", condition=lambda r: True, actions=[]))
+        quoted_sid = "patient's_seq_1"
+
+        _insert_event(connector, quoted_sid, [1.0, 0.0, 0.0], 1.0)
+        engine.poll_once()  # baseline
+
+        _insert_event(connector, quoted_sid, [0.0, 1.0, 0.0], 2.0)
+        alerts = engine.poll_once()
+
+        assert len(alerts) == 1
+        assert alerts[0]["sequence_id"] == quoted_sid
+
 
 # ---------------------------------------------------------------------------
 # Alert persistence

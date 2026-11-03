@@ -113,7 +113,7 @@ class MLPPredictor(nn.Module):
         """
         batch_size = context.shape[0]
         flat = context.reshape(batch_size, -1)
-        out = self.net(flat)
+        out: Tensor = self.net(flat)
         return out.reshape(batch_size, self.num_steps, self.embedding_dim)
 
     @torch.no_grad()
@@ -239,7 +239,7 @@ class TransformerPredictor(nn.Module):
 
         # Use last token's representation for prediction
         last_token = x[:, -1, :]  # (batch, embedding_dim)
-        out = self.head(last_token)  # (batch, num_steps * embedding_dim)
+        out: Tensor = self.head(last_token)  # (batch, num_steps * embedding_dim)
 
         return out.reshape(batch_size, self.num_steps, self.embedding_dim)
 

@@ -1,13 +1,16 @@
 """Tests for the pure (non-Modal, non-GPU) logic of scale_pipeline_v6.
 
-Skipped entirely if the modal package is not installed (the module imports
-modal at top level). GPU/Modal behavior is validated by `--action smoke` and
-the single-hospital run — see docs/V63_PREFLIGHT.md.
+Uses the lightweight Modal stub when the modal SDK is not installed locally.
+GPU/Modal behavior is validated by `--action smoke` and the single-hospital
+run — see docs/V63_PREFLIGHT.md.
 """
 
-import pytest
+import sys
 
-pytest.importorskip("modal")
+from event_jepa_cube.train_local import _install_modal_stub
+
+if "modal" not in sys.modules:
+    _install_modal_stub()
 
 from event_jepa_cube.scale_pipeline_v6 import (  # noqa: E402
     CURRICULUM_PHASES_V6,

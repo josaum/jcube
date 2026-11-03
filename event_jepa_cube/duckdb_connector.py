@@ -11,6 +11,7 @@ For Arrow performance: pip install event-jepa-cube[mycelia-arrow]
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from typing import Any
 
 try:
@@ -270,6 +271,7 @@ class DuckDBConnector:
         table: str = "event_sequences",
         *,
         query: str | None = None,
+        params: Sequence[Any] | None = None,
         column_map: dict[str, str] | None = None,
     ) -> dict[str, EventSequence]:
         """Load event sequences from a DuckDB table or custom query.
@@ -281,6 +283,7 @@ class DuckDBConnector:
             table: Table name to query (ignored if *query* is provided).
             query: Raw SQL query to execute instead of the default
                 ``SELECT * FROM <table>``.
+            params: Optional query parameters for parameterized SQL queries.
             column_map: Mapping from logical names (``sequence_id``,
                 ``embedding``, ``timestamp``, ``modality``) to actual column
                 names in the table.
@@ -294,7 +297,7 @@ class DuckDBConnector:
         if query is None:
             query = f"SELECT * FROM {_validate_identifier(table)}"
 
-        result = conn.execute(query)
+        result = conn.execute(query, list(params)) if params is not None else conn.execute(query)
         col_names = [desc[0] for desc in result.description]
 
         # Build column index lookup
@@ -338,6 +341,7 @@ class DuckDBConnector:
         table: str = "entities",
         *,
         query: str | None = None,
+        params: Sequence[Any] | None = None,
         column_map: dict[str, str] | None = None,
     ) -> dict[str, Entity]:
         """Load entities from a DuckDB table or custom query.
@@ -348,6 +352,7 @@ class DuckDBConnector:
         Args:
             table: Table name to query (ignored if *query* is provided).
             query: Raw SQL query to execute.
+            params: Optional query parameters for parameterized SQL queries.
             column_map: Mapping from logical names (``entity_id``,
                 ``modality``, ``embedding``, ``category``) to actual column
                 names.
@@ -361,7 +366,7 @@ class DuckDBConnector:
         if query is None:
             query = f"SELECT * FROM {_validate_identifier(table)}"
 
-        result = conn.execute(query)
+        result = conn.execute(query, list(params)) if params is not None else conn.execute(query)
         col_names = [desc[0] for desc in result.description]
 
         col_idx: dict[str, int] = {}

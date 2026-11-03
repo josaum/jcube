@@ -1,4 +1,5 @@
 .claude/
+.leio-code/
 __pycache__/
 *.py[cod]
 *$py.class
