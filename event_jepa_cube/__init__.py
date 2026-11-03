@@ -123,10 +123,49 @@ from .masking import relation_aware_mask
 
 __all__ += ["SharedGraphStore", "temporal_probe_split", "truncate_sequence_at_time", "relation_aware_mask"]
 
+# Low-level Arrow IPC engine (Rust + PyArrow IPC)
+from .arrow_ipc import (
+    ArrowIpcSharedTensor,
+    ArrowIpcTensorView,
+    backend_info,
+    batch_cosine_similarity_arrow_ipc,
+    centroid_anomalies_arrow_ipc,
+    compute_trend_arrow_ipc,
+    has_rust_arrow_ipc,
+    matrix_from_ipc_stream,
+    matrix_to_ipc_stream,
+    sequence_from_ipc_stream,
+    sequence_to_ipc_stream,
+    streaming_ema_batch_arrow_ipc,
+    top_k_cosine_arrow_ipc,
+    vector_from_ipc_stream,
+    vector_to_ipc_stream,
+    weighted_aggregate_arrow_ipc,
+)
+
 # Numpy-accelerated ops and mmap store (numpy optional)
 from .numpy_ops import HAS_NUMPY, MmapEmbeddingStore
 
-__all__ += ["HAS_NUMPY", "MmapEmbeddingStore"]
+__all__ += [
+    "HAS_NUMPY",
+    "MmapEmbeddingStore",
+    "ArrowIpcSharedTensor",
+    "ArrowIpcTensorView",
+    "backend_info",
+    "has_rust_arrow_ipc",
+    "sequence_to_ipc_stream",
+    "sequence_from_ipc_stream",
+    "matrix_to_ipc_stream",
+    "matrix_from_ipc_stream",
+    "vector_to_ipc_stream",
+    "vector_from_ipc_stream",
+    "weighted_aggregate_arrow_ipc",
+    "compute_trend_arrow_ipc",
+    "streaming_ema_batch_arrow_ipc",
+    "batch_cosine_similarity_arrow_ipc",
+    "top_k_cosine_arrow_ipc",
+    "centroid_anomalies_arrow_ipc",
+]
 
 # Bandit client (no external deps — uses stdlib urllib)
 from .bandit import BanditClient, BanditError, CascadeBandit

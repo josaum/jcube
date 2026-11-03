@@ -245,25 +245,40 @@ def _load_embeddings(
 
     import pyarrow as pa
     import pyarrow.compute as pc
+    import pyarrow.ipc as pa_ipc
     import pyarrow.parquet as pq
-    import torch
+
+    from .arrow_ipc import matrix_from_ipc_stream
 
     print(f"Loading embedding graph vocabulary from {gp}...")
     t0 = time.time()
-    table = pq.read_table(gp, columns=["subject_id", "object_id"])
+    if gp.endswith((".arrow", ".ipc", ".feather")):
+        with pa.memory_map(gp, "r") as mmap_src:
+            table = pa_ipc.open_file(mmap_src).read_all()
+        if "subject_id" in table.column_names and "object_id" in table.column_names:
+            table = table.select(["subject_id", "object_id"])
+    else:
+        table = pq.read_table(gp, columns=["subject_id", "object_id"])
     all_nodes = pa.chunked_array(table.column("subject_id").chunks + table.column("object_id").chunks)
     unique_nodes = pc.unique(all_nodes)
     node_names = unique_nodes.to_numpy(zero_copy_only=False).astype(object)
     del table, all_nodes, unique_nodes
 
     print(f"Loading weights from {wp}...")
-    weights_obj = torch.load(wp, map_location="cpu", weights_only=True)
-    if isinstance(weights_obj, torch.Tensor):
-        embeddings = weights_obj.float().numpy()
-    elif isinstance(weights_obj, dict) and "weight" in weights_obj:
-        embeddings = weights_obj["weight"].float().numpy()
+    if wp.endswith((".arrow", ".ipc", ".feather")):
+        with pa.memory_map(wp, "r") as mmap_src:
+            raw_ipc = mmap_src.read_buffer().to_pybytes()
+        embeddings = np.asarray(matrix_from_ipc_stream(raw_ipc), dtype=np.float32)
     else:
-        embeddings = list(weights_obj.values())[0].float().numpy()
+        import torch
+
+        weights_obj = torch.load(wp, map_location="cpu", weights_only=True)
+        if isinstance(weights_obj, torch.Tensor):
+            embeddings = weights_obj.float().numpy()
+        elif isinstance(weights_obj, dict) and "weight" in weights_obj:
+            embeddings = weights_obj["weight"].float().numpy()
+        else:
+            embeddings = list(weights_obj.values())[0].float().numpy()
 
     if len(node_names) != embeddings.shape[0]:
         print(f"WARNING: {len(node_names)} names vs {embeddings.shape[0]} vectors — truncating")
